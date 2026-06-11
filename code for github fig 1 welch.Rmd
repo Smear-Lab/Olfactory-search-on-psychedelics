@@ -1,0 +1,1477 @@
+---
+title: "Figure 1 Welch"
+author: "Amanda Welch"
+date: "2026-06-04"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# library(psych)
+# library(rio)
+# library(tidyverse)
+# library(ggplot2)
+# library(data.table)
+# library(vroom)
+# library(gtools)
+# library(remotes)
+# library(dplyr)
+# library(fuzzyjoin)
+# library(purrr)
+# library(ggprism)
+# library(ggpubr)
+```
+
+# Figure 1
+
+```{r}
+library(gtools)
+
+# create vector listing all the trial summary files in the chosen directory with trial summary files
+trial_summ <- list.files(path = "D:/newmove", 
+                         recursive = TRUE,
+                         pattern = "trialsummary.txt",
+                         full.names = TRUE)
+
+# print out the file paths to check
+print(trial_summ)
+
+# create a new vector listing only the paths including 100-0 condition
+trial_summ_iti <- trial_summ[grep("100-0", 
+                                  trial_summ)]
+
+# print out the paths including 100-0
+print(trial_summ_iti)
+
+# re-order files numerically so the sessions import in order
+trial_summ_sorted <- mixedsort(trial_summ_iti)
+
+# print out the sorted file paths
+print(trial_summ_sorted)
+```
+
+``` {r}
+# mouse 2191 session 20 is a blank file because no trials were completed. session will be dropped from analysis but adding 2 lines of fake trials to import all data correctly
+
+# pulls all trial summaries into 1 giant list
+all_data <- lapply(trial_summ_sorted,
+                   read.table,
+                   header = FALSE,
+                   sep = ",")
+```
+
+```{r}
+# name all the df's in all_data based on directory
+names(all_data) <- trial_summ_sorted
+```
+
+```{r remove low trials}
+# remove df's with less than 40 trials
+data_above40trials <-
+  purrr::discard(all_data, ~nrow(.) < 40)
+```
+
+```{r column titles}
+# name df columns
+colnames <- c("trial","odor_setting","odor_side",
+              "success","tstart", "tend","set_iti")
+```
+
+```{r name columns}
+# name columns in dfs
+for (i in seq_along(data_above40trials)) {
+  colnames(data_above40trials[[i]]) <- colnames
+}
+```
+
+```{r manually discard sessions with N2/odor delivery errors}
+# manually discard sessions with N2/odor delivery errors according to the experimenter notes in notes file
+
+#2174 session 34 "error on left valve - fixed after session"
+data_above40trials <- data_above40trials[names(data_above40trials) != 
+                                           "D:Mouse_2174/iti_intervals/34/trialsummary.txt"]
+
+#2174 session 24 "N2 not turned on for half of session"
+data_above40trials <- data_above40trials[names(data_above40trials) != 
+                                           "D:Mouse_2174/iti_intervals/24/trialsummary.txt"]
+
+#2174 session 92 "Left N2 had problems"
+data_above40trials <- data_above40trials[names(data_above40trials) != 
+                                           "D:Mouse_2174/iti_intervals/92/trialsummary.txt"]
+
+#2185 session 74 "Left N2 had problems" same day for 2174
+data_above40trials <- data_above40trials[names(data_above40trials) != 
+                                           "D:Mouse_2185/iti_intervals/74/trialsummary.txt"]
+```
+
+```{r calculate trial duration}
+# calculate trial length for every session
+data_above40trials <- lapply(data_above40trials, 
+                             transform, 
+                             trial_length = tend - tstart)
+```
+
+```{r calculate iti length}
+# calculate length of iti
+data_above40trials <- lapply(data_above40trials, 
+                             transform, 
+                             iti_length = tstart - lag(tend))
+```
+
+```{r move ITI duration up 1 row in all frames}
+# move ITI duration up 1 row in all frames
+library(tidyverse)
+shift <- function(x, n){
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+for (i in seq_along(data_above40trials)) {
+  shift(data_above40trials[[i]]$iti_length, 1) %>% 
+    {. ->> data_above40trials[[i]]$iti_length}
+}
+```
+
+```{r accuracy}
+# calculate percent correct, trials performed, and average trial duration by odor omission and odor trials in each data frame
+data_above40trials %>% 
+  map(~summarise(group_by(., odor_setting),
+                 trials_performed = length(odor_setting),
+                 avg_trial_length = mean(trial_length),
+                 avg_iti_length = mean(iti_length, na.rm = TRUE),
+                 percent_correct = mean(success) * 100)) %>% 
+  {. ->> percent_correct} # save to its own variable in environment
+```
+
+```{r}
+library(data.table)
+
+# create a list from df of session stats
+percent_correct_list <- do.call(rbind.data.frame, percent_correct)
+
+# create column that is row names (directory info)
+percent_correct_list <- setDT(percent_correct_list, keep.rownames = TRUE)[]
+```
+
+```{r}
+# create columns for ID number and session number to make plotting easier
+percent_correct_list %>% 
+  # extract all numeric values from the string
+  mutate(allnums = regmatches(rn, 
+                              gregexpr("+[[:digit:]]+", 
+                                       rn)))%>%
+  # separate them
+  separate(allnums, into = c("id", "session", "idk"), 
+           sep = "\\,") %>%
+  # extract them individually
+  mutate(id = as.numeric(regmatches(id, 
+                                    gregexpr("+[[:digit:]]+", 
+                                             id,))),
+         session = as.numeric(regmatches(session, 
+                                         gregexpr("+[[:digit:]]+", 
+                                                  session)))) %>%
+  select(-idk, 
+         -rn) %>% 
+  {. ->> accuracy}
+```
+
+```{r}
+# extract session numbers from file paths for percent_correct_list
+accuracy <- percent_correct_list %>%
+  # extract session numbers
+  mutate(
+    id = as.numeric(sub('.*/([0-9]+)/100-0/.*', '\\1', 
+                        rn)),
+    session = as.numeric(sub('.*/100-0/([0-9]+)/.*', '\\1', 
+                             rn))
+  ) %>%
+  select(-rn)
+```
+
+```{r doi sessions}
+# manually add DOI session doses from notebook, mostly 0's
+#jan 28 2022
+# 2174 session 57
+# 2181 session 42
+# 2182 session 32
+# 2183 session 34
+# 2185 session 41 
+# 2191 session 25
+# 2195 session 17
+# 2196 session 18
+# 2197 session 17
+# 2198 session 17
+# 2200 session 14
+# 2201 session 16
+# 2202 session 19
+# 2203 session 13
+# 2204 session 17
+accuracy$doi_dose <- ifelse(accuracy$id == "2174" & accuracy$session == "57" | 
+                              accuracy$id == "2181" & accuracy$session == "42" | 
+                              accuracy$id == "2182" & accuracy$session == "32" | 
+                              accuracy$id == "2183" & accuracy$session == "34" | 
+                              accuracy$id == "2185" & accuracy$session == "41" |
+                              accuracy$id == "2191" & accuracy$session == "25" |
+                              accuracy$id == "2195" & accuracy$session == "17" |
+                              accuracy$id == "2196" & accuracy$session == "18" |
+                              accuracy$id == "2197" & accuracy$session == "17" |
+                              accuracy$id == "2198" & accuracy$session == "17" |
+                              accuracy$id == "2200" & accuracy$session == "14" |
+                              accuracy$id == "2201" & accuracy$session == "16" |
+                              accuracy$id == "2202" & accuracy$session == "19" |
+                              accuracy$id == "2203" & accuracy$session == "13" |
+                              accuracy$id == "2204" & accuracy$session == "17" |
+                              accuracy$id == "2205" & accuracy$session == "12" |
+                              accuracy$id == "2208" & accuracy$session == "18" |
+                              accuracy$id == "2209" & accuracy$session == "14" |
+                              accuracy$id == "2210" & accuracy$session == "17" |
+                              accuracy$id == "2211" & accuracy$session == "13" |
+                              accuracy$id == "2212" & accuracy$session == "16" |
+                              accuracy$id == "2213" & accuracy$session == "14", "3", "0")
+# if id is 2174 and session is 57 OR
+# id is 2181 and session is 42, etc. dose is 3, otherwise 0
+```
+
+```{r control sessions}
+accuracy$saline_dose <- ifelse(
+                              accuracy$id == "2174" & accuracy$session == "56" | 
+                              accuracy$id == "2181" & accuracy$session == "41" | 
+                              accuracy$id == "2182" & accuracy$session == "31" | 
+                              accuracy$id == "2183" & accuracy$session == "33" | 
+                              accuracy$id == "2185" & accuracy$session == "40" |
+                              accuracy$id == "2191" & accuracy$session == "21" |
+                              accuracy$id == "2195" & accuracy$session == "20" |
+                              accuracy$id == "2196" & accuracy$session == "16" |
+                              accuracy$id == "2197" & accuracy$session == "19" |
+                              accuracy$id == "2198" & accuracy$session == "19" |
+                              accuracy$id == "2200" & accuracy$session == "19" |
+                              accuracy$id == "2201" & accuracy$session == "21" |
+                              accuracy$id == "2202" & accuracy$session == "14" |
+                              accuracy$id == "2203" & accuracy$session == "18" |
+                              accuracy$id == "2204" & accuracy$session == "22" |
+                              accuracy$id == "2205" & accuracy$session == "16" |
+                              accuracy$id == "2208" & accuracy$session == "14" |
+                              accuracy$id == "2209" & accuracy$session == "18" |
+                              accuracy$id == "2210" & accuracy$session == "13" |
+                              accuracy$id == "2211" & accuracy$session == "17" |
+                              accuracy$id == "2212" & accuracy$session == "13" |
+                              accuracy$id == "2213" & accuracy$session == "18"  , "3", "0")
+```
+
+```{r assign sex}
+# add mouse sex
+# 2174 F, 2181 F, 2182 M, 2183 M, 2185 M, 2191 F, 2195 - 98 M, 2200 - 2204 F4, 2205-06 M, 2208-09 M,2210-13 F 
+accuracy$sex <- ifelse(accuracy$id %in% c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213), "F", "M")
+```
+
+```{r}
+# create a new data frame with rows where doi_dose is 3
+doi_3_df <- accuracy[accuracy$doi_dose == 3, ]
+
+# create a new data frame with rows where saline_dose is 3
+saline_3_df <- accuracy[accuracy$saline_dose == 3, ]
+
+# combine the two data frames to get rows where either doi_dose or saline_dose is 3
+doi_saline_df <- rbind(doi_3_df, saline_3_df)
+```
+
+```{r odor and omission trials}
+# create list for only odor trials
+odor_trials <- filter(accuracy, odor_setting==0)
+omission_trials <- filter(accuracy, odor_setting==3)
+```
+
+```{r}
+modified_df <- odor_trials %>%
+  group_by(id, sex) %>%
+  summarize(
+    doi_correct = percent_correct[doi_dose == 3],
+    saline_correct = percent_correct[saline_dose == 3]) %>%
+  mutate(doi_correct = round(doi_correct, 1),
+  saline_correct = round(saline_correct, 1))
+```
+
+```{r}
+modified_df_omission <- omission_trials %>%
+  group_by(id, sex) %>%
+  summarize(
+    doi_correct = percent_correct[doi_dose == 3],
+    saline_correct = percent_correct[saline_dose == 3],
+    doi_trials = trials_performed[doi_dose == 3],
+    saline_trials = trials_performed[saline_dose == 3]) %>%
+  mutate(doi_correct = round(doi_correct, 1),
+  saline_correct = round(saline_correct, 1))
+```
+
+```{r}
+group_stats_by_sex <- modified_df %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(doi_correct, na.rm = TRUE),
+    doi_median = median(doi_correct, na.rm = TRUE),
+    saline_mean = mean(saline_correct, na.rm = TRUE),
+    saline_median = median(saline_correct, na.rm = TRUE),
+    n = n()  # optional: number of mice per sex
+  )
+```
+
+
+# Accuracy stats
+
+```{r}
+df_id_sex_accuracy_trials <- odor_trials %>%
+  group_by(id, sex) %>%
+  summarize(
+    doi_correct = round(percent_correct[doi_dose == 3], 1),
+    saline_correct = round(percent_correct[saline_dose == 3], 1),
+    doi_trials = trials_performed[doi_dose == 3],
+    saline_trials = trials_performed[saline_dose == 3])
+```
+
+# 1B
+
+```{r Fig 1 B}
+modified_df %>% 
+  ggplot(aes(x = saline_correct, 
+             y = doi_correct, 
+             color = sex, 
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+  
+  # add group medians
+  geom_point(data = group_stats_by_sex,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big O
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+  
+  scale_color_manual(values = c("M" = "#00B19E", 
+                                "F" = "#990068"), 
+                     guide = "none") +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dotted", 
+              color = "black",
+              size = 1) +
+  labs(title = "Accuracy in task",
+       x = "Saline accuracy (%)",
+       y = "DOI accuracy (%)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(62, 100)) +
+  scale_y_continuous(limits = c(62, 100)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.15, 0.9),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),  # Increase size of axis titles
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E" ))))  # Merge shape & color
+
+# code checked 11/14/2024 for accuracy
+# added median to plot 4/11/26
+```
+
+```{r export accuracy as tiff for publcation 1B}
+tiff("C:/Users/Amanda Welch/Desktop/Paper Resubmission/accuracy_plot.tiff", 
+     width = 6, 
+     height = 6, 
+     units = "in", 
+     res = 600)
+
+modified_df %>% 
+  ggplot(aes(x = saline_correct, 
+             y = doi_correct, 
+             color = sex, 
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+  
+  # add group medians
+  geom_point(data = group_stats_by_sex,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big O
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+  
+  scale_color_manual(values = c("M" = "#00B19E", 
+                                "F" = "#990068"), 
+                     guide = "none") +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dotted", 
+              color = "black",
+              size = 1) +
+  labs(title = "Accuracy in task",
+       x = "Saline accuracy (%)",
+       y = "DOI accuracy (%)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(62, 100)) +
+  scale_y_continuous(limits = c(62, 100)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.15, 0.9),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),  # Increase size of axis titles
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E" ))))  # Merge shape & color
+dev.off()
+
+```
+
+```{r Fig 1B stats}
+# Wilcoxon signed-rank test
+result_wilcox_test <- wilcox.test(modified_df$doi_correct, 
+                                  modified_df$saline_correct, 
+                                  paired = TRUE)
+
+# print the result
+print(result_wilcox_test)
+```
+
+# 1C
+
+```{r}
+# define the list of conditions for mouse ID and session number for DOI
+conditions <- list(
+  c(2174, 57), c(2181, 42), c(2182, 32), c(2183, 34), c(2185, 41),
+  c(2191, 25), c(2195, 17), c(2196, 18), c(2197, 17), c(2198, 17),
+  c(2200, 14), c(2201, 16), c(2202, 19), c(2203, 13), c(2204, 17),
+  c(2205, 12), c(2208, 18), c(2209, 14), c(2210, 17), c(2211, 13),
+  c(2212, 16), c(2213, 14)
+)
+
+# initialize an empty list to store the selected data frames
+doi_trial_summaries <- list()
+
+# loop through the conditions and extract matching data frames from all_data
+for (condition in conditions) {
+  # construct the file path based on the mouse ID and session number
+  mouse_id <- condition[1]
+  session_num <- condition[2]
+  file_path <- paste0("D:/newmove/", 
+                      mouse_id, 
+                      "/100-0/", 
+                      session_num, 
+                      "/trialsummary.txt")
+  
+  # check if the file exists in all_data
+  if (file_path %in% names(all_data)) {
+    # append the corresponding data frame to doi_trial_summaries
+    doi_trial_summaries[[file_path]] <- all_data[[file_path]]
+  }
+}
+
+# view the new list of extracted data frames
+doi_trial_summaries
+```
+
+```{r name columns}
+# name columns in dfs
+for (i in seq_along(doi_trial_summaries)) {
+  colnames(doi_trial_summaries[[i]]) <- colnames
+}
+```
+
+```{r}
+# define the list of conditions for mouse ID and session number for saline
+saline_conditions <- list(
+  c(2174, 56), c(2181, 41), c(2182, 31), c(2183, 33), c(2185, 40),
+  c(2191, 21), c(2195, 20), c(2196, 16), c(2197, 19), c(2198, 19),
+  c(2200, 19), c(2201, 21), c(2202, 14), c(2203, 18), c(2204, 22),
+  c(2205, 16), c(2208, 14), c(2209, 18), c(2210, 13), c(2211, 17),
+  c(2212, 13), c(2213, 18)
+)
+
+# initialize an empty list to store the selected saline data frames
+saline_trial_summaries <- list()
+
+# loop through the saline conditions and extract matching data frames from all_data
+for (condition in saline_conditions) {
+  # construct the file path based on the mouse ID and session number for saline
+  mouse_id <- condition[1]
+  session_num <- condition[2]
+  file_path <- paste0("D:/newmove/", 
+                      mouse_id, "/100-0/", 
+                      session_num, 
+                      "/trialsummary.txt")
+  
+  # check if the file exists in all_data
+  if (file_path %in% names(all_data)) {
+    # Append the corresponding data frame to saline_trial_summaries
+    saline_trial_summaries[[file_path]] <- all_data[[file_path]]
+  }
+}
+
+# view the new list of extracted saline data frames
+saline_trial_summaries
+
+```
+
+```{r name columns}
+# name columns in dfs
+for (i in seq_along(saline_trial_summaries)) {
+  colnames(saline_trial_summaries[[i]]) <- colnames
+}
+```
+
+```{r rolling accuracy saline}
+# loop through each data frame in saline_trial_summaries
+for (df_name in names(saline_trial_summaries)) {
+  df <- saline_trial_summaries[[df_name]]
+  
+  # initialize the rolling_accuracy column
+  df$rolling_accuracy <- NA
+  
+  # calculate rolling accuracy for each odor_setting group separately (0 and 3)
+  for (odor in c(0, 3)) {
+    # get trials where odor_setting is 0 or 3
+    odor_trials <- df[df$odor_setting == odor, ]
+    
+    # initialize success count and total count for rolling accuracy calculation
+    success_count <- 0
+    total_count <- 0
+    
+    # loop through the trials to calculate rolling accuracy
+    for (i in 1:nrow(odor_trials)) {
+      total_count <- total_count + 1
+      if (odor_trials$success[i] == 1) {
+        success_count <- success_count + 1
+      }
+      
+      # calculate rolling accuracy and store it in the column
+      odor_trials$rolling_accuracy[i] <- (success_count / total_count) * 100
+    }
+    
+    # update the df with the calculated rolling accuracy for the current odor_setting
+    df[df$odor_setting == odor, ] <- odor_trials
+  }
+  
+  # save the updated df back into saline_trial_summaries
+  saline_trial_summaries[[df_name]] <- df
+}
+
+# view the updated saline_trial_summaries with the rolling_accuracy column
+saline_trial_summaries
+```
+
+```{r rolling accuracy doi}
+# loop through each data frame in doi_trial_summaries
+for (df_name in names(doi_trial_summaries)) {
+  df <- doi_trial_summaries[[df_name]]
+
+  # initialize the rolling_accuracy column
+  df$rolling_accuracy <- NA
+
+  # calculate rolling accuracy for each odor_setting group separately (0 and 3)
+  for (odor in c(0, 3)) {
+    # Get trials where odor_setting is 0 or 3
+    odor_trials <- df[df$odor_setting == odor, ]
+
+    # initialize success count and total count for rolling accuracy calculation
+    success_count <- 0
+    total_count <- 0
+
+    # loop through the trials to calculate rolling accuracy
+    for (i in 1:nrow(odor_trials)) {
+      total_count <- total_count + 1
+      if (odor_trials$success[i] == 1) {
+        success_count <- success_count + 1
+      }
+
+      # calculate rolling accuracy and store it in the column
+      odor_trials$rolling_accuracy[i] <- (success_count / total_count) * 100
+    }
+
+    # update the df with the calculated rolling accuracy for the current odor_setting
+    df[df$odor_setting == odor, ] <- odor_trials
+  }
+
+  # save the updated df back into doi_trial_summaries
+  doi_trial_summaries[[df_name]] <- df
+}
+
+# view the updated doi_trial_summaries with the rolling_accuracy column
+doi_trial_summaries
+
+```
+
+```{r rename file path to just id}
+# create a new list to store renamed data frames
+renamed_doi_trial_summaries <- list()
+
+for (df_name in names(doi_trial_summaries)) {
+  # extract the mouse ID from the file path
+  mouse_id <- sub(".*/([0-9]+)/100-0/.*", "\\1", df_name)  # Capture only the first numeric ID
+  
+  # store the data frame under the new name
+  renamed_doi_trial_summaries[[mouse_id]] <- doi_trial_summaries[[df_name]]
+}
+
+# replace the old list with the new one
+doi_trial_summaries <- renamed_doi_trial_summaries
+
+# view the new names
+names(doi_trial_summaries)
+```
+
+```{r}
+# combine all data frames in doi_trial_summaries into one
+df_all_doi <- bind_rows(doi_trial_summaries, 
+                        .id = "mouse_id")
+
+# convert tstart from seconds to minutes
+df_all_doi <- df_all_doi %>%
+  mutate(tstart_min = tstart / 60)
+
+df_final <- df_all_doi %>%
+  group_by(mouse_id, 
+           odor_setting) %>%
+  filter(tstart_min == max(tstart_min)) %>%
+  ungroup()
+```
+
+```{r rename file path to just id}
+# create a new list to store renamed data frames
+renamed_saline_trial_summaries <- list()
+
+for (df_name in names(saline_trial_summaries)) {
+  # extract the mouse ID from the file path
+  mouse_id <- sub(".*/([0-9]+)/100-0/.*", "\\1", 
+                  df_name)  # Capture only the first numeric ID
+  
+  # store the data frame under the new name
+  renamed_saline_trial_summaries[[mouse_id]] <- saline_trial_summaries[[df_name]]
+}
+
+# replace the old list with the new one
+saline_trial_summaries <- renamed_saline_trial_summaries
+
+# view the new names
+names(saline_trial_summaries)
+```
+
+```{r}
+# combine all data frames in doi_trial_summaries into one
+df_all_saline <- bind_rows(saline_trial_summaries, 
+                           .id = "mouse_id")
+
+# convert tstart from seconds to minutes
+df_all_saline <- df_all_saline %>%
+  mutate(tstart_min = tstart / 60)
+
+df_final_s <- df_all_saline %>%
+  group_by(mouse_id, odor_setting) %>%
+  filter(tstart_min == max(tstart_min)) %>%
+  ungroup()
+```
+
+```{r means binned in 5 min intervals doi}
+# filter for odor_setting == 0
+df_doi_odor0 <- df_all_doi %>% filter(odor_setting == 0)
+
+# bin time into 8 equal intervals (5 min each)
+df_doi_odor0 <- df_doi_odor0 %>%
+  mutate(time_bin = cut(tstart_min, breaks = seq(0, 40, 
+                                                 by = 5), 
+                        include.lowest = TRUE, 
+                        labels = paste0(seq(0, 35, 
+                                            by = 5), "-", seq(5, 40, 
+                                                              by = 5), 
+                                        " min")))
+
+# calculate mean rolling accuracy per bin for each mouse
+df_binned_odor0 <- df_doi_odor0 %>%
+  group_by(mouse_id,
+           time_bin) %>%
+  summarise(mean_accuracy = mean(rolling_accuracy,
+                                 na.rm = TRUE),
+            .groups = "drop")
+```
+
+```{r}
+df_grand_mean_odor_sem <- df_binned_odor0 %>%
+  group_by(time_bin) %>%
+  summarise(
+    grand_mean_accuracy = mean(mean_accuracy,
+                               na.rm = TRUE),
+    sd = sd(mean_accuracy, na.rm = TRUE),
+    sem_accuracy = sd(mean_accuracy,
+                      na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# make sure time_bin is ordered correctly
+df_grand_mean_odor_sem$time_bin <- factor(df_grand_mean_odor_sem$time_bin,
+                                 levels = paste0(seq(0, 35, by = 5), "-",
+                                                 seq(5, 40, by = 5), " min"))
+```
+
+
+```{r means binned in 5 min intervals saline}
+# filter for odor_setting == 0
+df_saline_odor0 <- df_all_saline %>% filter(odor_setting == 0)
+
+# bin time into 8 equal intervals (5 min each)
+df_saline_odor0 <- df_saline_odor0 %>%
+  mutate(time_bin = cut(tstart_min, 
+                        breaks = seq(0, 40, by = 5), 
+                        include.lowest = TRUE, 
+                        labels = paste0(seq(0, 35, by = 5), "-", 
+                                        seq(5, 40, by = 5), " min")))
+
+# calculate mean rolling accuracy per bin for each mouse
+df_binned_odor0_saline <- df_saline_odor0 %>%
+  group_by(mouse_id, time_bin) %>%
+  summarise(mean_accuracy = mean(rolling_accuracy, 
+                                 na.rm = TRUE), 
+            .groups = "drop")
+```
+
+```{r}
+df_grand_mean_saline_sem <- df_binned_odor0_saline %>%
+  group_by(time_bin) %>%
+  summarise(
+    grand_mean_accuracy = mean(mean_accuracy, 
+                               na.rm = TRUE),
+    sd = sd(mean_accuracy, 
+            na.rm = TRUE),
+    sem_accuracy = sd(mean_accuracy, 
+                      na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# make sure time_bin is ordered correctly
+df_grand_mean_saline_sem$time_bin <- factor(df_grand_mean_saline_sem$time_bin, 
+                                 levels = paste0(seq(0, 35, by = 5), "-", 
+                                                 seq(5, 40, by = 5), " min"))
+```
+
+```{r}
+# add a condition column to distinguish between saline and DOI
+df_grand_mean_saline_sem <- df_grand_mean_saline_sem %>%
+  mutate(condition = "Saline")
+
+df_grand_mean_odor_sem <- df_grand_mean_odor_sem %>%
+  mutate(condition = "DOI")
+
+# combine the two data frames
+df_combined_grandmean_sem <- bind_rows(df_grand_mean_saline_sem, df_grand_mean_odor_sem)
+
+# 'time_bin' is an ordered factor
+df_combined_grandmean_sem$time_bin <- factor(df_combined_grandmean_sem$time_bin, 
+                               levels = paste0(seq(0, 35, by = 5), "-", 
+                                               seq(5, 40, by = 5), " min"))
+```
+
+```{r}
+# combine both saline and DOI data sets, adding a 'condition' column
+df_combined <- bind_rows(
+  df_binned_odor0_saline %>% mutate(condition = "Saline"),
+  df_binned_odor0 %>% mutate(condition = "DOI")
+)
+```
+
+```{r}
+df_binned_doi <- df_binned_odor0 %>%
+  mutate(source = "DOI")
+
+df_binned_saline <- df_binned_odor0_saline %>%
+  mutate(source = "Saline")
+```
+
+```{r}
+# combine the two data frames
+binned_means <- bind_rows(df_binned_doi,
+                          df_binned_saline)
+```
+
+```{r}
+# add condition labels to grand mean data frames
+df_grand_mean_saline_sem$source <- "Saline_Grand"
+df_grand_mean_odor_sem$source <- "DOI_Grand"
+
+# combine grand mean data frames
+df_grand_mean_combined <- bind_rows(df_grand_mean_saline_sem, 
+                                    df_grand_mean_odor_sem)
+
+```
+
+```{r}
+# define ordered time_bin levels without "min"
+time_bin_levels <- paste0(seq(0, 35, by = 5), "-", seq(5, 40, by = 5))
+
+# update the time_bin column
+df_grand_mean_combined$time_bin <- factor(
+  gsub(" min", "", df_grand_mean_combined$time_bin),
+  levels = time_bin_levels
+)
+
+# update the time_bin column
+binned_means$time_bin <- factor(
+  gsub(" min", "", binned_means$time_bin),
+  levels = time_bin_levels
+)
+```
+
+```{r}
+ggplot() +
+  
+  # individual mouse accuracy lines (DOI = purple, Saline = black), legend removed
+  geom_line(data = binned_means, aes(x = time_bin, 
+                                     y = mean_accuracy, 
+                                     color = source, 
+                                     group = interaction(mouse_id, 
+                                                         source)), 
+            alpha = 0.4, show.legend = FALSE) +
+
+  # grand mean shaded SD region (DOI = purple, Saline = black)
+  geom_ribbon(data = df_grand_mean_combined, 
+              aes(x = time_bin, 
+                  ymin = grand_mean_accuracy - sd, 
+                  ymax = grand_mean_accuracy + sd, 
+                  fill = source, 
+                  group = source), 
+              alpha = 0.2) +
+
+  # grand mean lines with points
+  geom_line(data = df_grand_mean_combined, 
+            aes(x = time_bin, 
+                y = grand_mean_accuracy, 
+                color = source, 
+                group = source), 
+            size = 1.2) +
+  
+  geom_point(data = df_grand_mean_combined, 
+             aes(x = time_bin, 
+                 y = grand_mean_accuracy, 
+                 color = source, 
+                 group = source), 
+             size = 4,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # manual color mapping with updated legend labels
+  scale_color_manual(values = c("DOI_Grand" = "#a449e2", "Saline_Grand" = "black"), 
+                     labels = c("DOI_Grand" = "DOI", "Saline_Grand" = "Saline")) +
+  scale_fill_manual(values = c("DOI_Grand" = "#a449e2", "Saline_Grand" = "black"), 
+                    labels = c("DOI_Grand" = "DOI", "Saline_Grand" = "Saline")) +
+
+  scale_y_continuous(limits = c(50, 110)) +
+
+  # labels & theme
+  labs(
+    title = "Accuracy over time",
+    x = "Time (min)",
+    y = "Grand mean accuracy (%)",
+    color = NULL,  # Removes legend title
+    fill = NULL     # Removes legend title
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 20),
+    legend.position = c(0.8, 0.15),  # Adjusted position
+    plot.title = element_text(hjust = 0.5, 
+                              size = 24),
+    axis.text.x = element_text(angle = 45, 
+                               hjust = 1),
+    legend.text = element_text(size = 20),
+    axis.title = element_text(size = 20),  
+    axis.text = element_text(size = 20),
+    axis.line = element_line(linewidth = 1.2)
+  ) +
+  
+  # keep only grand mean legend
+  guides(color = guide_legend(override.aes = list(size = 3)), 
+         fill = guide_legend(override.aes = list(alpha = 0.2)))
+```
+
+```{r}
+wilcoxon_results <- df_combined %>%
+  group_by(time_bin) %>%
+  summarise(
+    p_value = wilcox.test(mean_accuracy ~ condition)$p.value,
+    .groups = 'drop'
+  )
+
+# view results
+print(wilcoxon_results)
+```
+
+# 1D
+
+```{r calculate columns of stats}
+data_above40trials %>% 
+  map(~summarise(group_by(., odor_setting),
+                 trials_performed = length(odor_setting),
+                 avg_trial_length = mean(trial_length),
+                 sd_trial_length = sd(trial_length),
+                 avg_iti_length = mean(iti_length, na.rm = TRUE),
+                 sd_iti_length = sd(iti_length, na.rm = TRUE),
+                 percent_correct = mean(success) * 100)) %>% 
+  {. ->> full_stats} # save to its own variable in environment
+```
+
+```{r converting from large nested list to 1 df}
+# create a list from df of session stats
+stats_list <- do.call(rbind.data.frame, 
+                      full_stats)
+
+# create column that is row names (directory info)
+stats_list <- setDT(stats_list, 
+                    keep.rownames = TRUE)[]
+```
+
+```{r rename columns to grab mouse ID and session}
+# create columns for ID number and session number to make plotting easier
+stats_list %>% 
+  # extract all numeric values from the string
+  mutate(allnums = regmatches(rn, 
+                              gregexpr("+[[:digit:]]+", 
+                                       rn)))%>%
+  # separate them
+  separate(allnums, 
+           into = c("id", "session", "idk"), 
+           sep = "\\,") %>%
+  # extract them individually
+  mutate(id = as.numeric(regmatches(id, 
+                                    gregexpr("+[[:digit:]]+", 
+                                             id,))),
+         session = as.numeric(regmatches(session, 
+                                         gregexpr("+[[:digit:]]+", 
+                                                  session)))) %>%
+  select(-idk, 
+         -rn) %>% 
+  {. ->> stats}
+```
+
+```{r}
+# extract session numbers from file paths for percent_correct_list
+stats <- stats_list %>%
+  # extract session numbers
+  mutate(
+    id = as.numeric(sub('.*/([0-9]+)/100-0/.*', '\\1', 
+                        rn)),
+    session = as.numeric(sub('.*/100-0/([0-9]+)/.*', '\\1', 
+                             rn))
+  ) %>%
+  select(-rn)
+```
+
+```{r doi sessions}
+#manually add DOI session doses from notebook, mostly 0's
+#jan 28 2022
+#2174 session 57
+#2181 session 42
+#2182 session 32
+#2183 session 34
+#2185 session 41 
+# 2191 session 25
+# 2195 session 17
+# 2196 session 18
+# 2197 session 17
+# 2198 session 17
+# 2200 session 14
+# 2201 session 16
+# 2202 session 19
+# 2203 session 13
+# 2204 session 17
+stats$doi_dose <- ifelse(stats$id == "2174" & stats$session == "57" | 
+                              stats$id == "2181" & stats$session == "42" | 
+                              stats$id == "2182" & stats$session == "32" | 
+                              stats$id == "2183" & stats$session == "34" | 
+                              stats$id == "2185" & stats$session == "41" |
+                              stats$id == "2191" & stats$session == "25" |
+                              stats$id == "2195" & stats$session == "17" |
+                              stats$id == "2196" & stats$session == "18" |
+                              stats$id == "2197" & stats$session == "17" |
+                              stats$id == "2198" & stats$session == "17" |
+                              stats$id == "2200" & stats$session == "14" |
+                              stats$id == "2201" & stats$session == "16" |
+                              stats$id == "2202" & stats$session == "19" |
+                              stats$id == "2203" & stats$session == "13" |
+                              stats$id == "2204" & stats$session == "17" |
+                              stats$id == "2205" & stats$session == "12" |
+                              stats$id == "2208" & stats$session == "18" |
+                              stats$id == "2209" & stats$session == "14" |
+                              stats$id == "2210" & stats$session == "17" |
+                              stats$id == "2211" & stats$session == "13" |
+                              stats$id == "2212" & stats$session == "16" |
+                              stats$id == "2213" & stats$session == "14", "3", "0")
+# if id is 2174 and session is 57 OR
+# id is 2181 and session is 42, etc. dose is 3, otherwise 0
+```
+
+```{r}
+stats$saline_dose <- ifelse(
+                              stats$id == "2174" & stats$session == "56" | 
+                              stats$id == "2181" & stats$session == "41" | 
+                              stats$id == "2182" & stats$session == "31" | 
+                              stats$id == "2183" & stats$session == "33" | 
+                              stats$id == "2185" & stats$session == "40" |
+                              stats$id == "2191" & stats$session == "21" |
+                              stats$id == "2195" & stats$session == "20" |
+                              stats$id == "2196" & stats$session == "16" |
+                              stats$id == "2197" & stats$session == "19" |
+                              stats$id == "2198" & stats$session == "19" |
+                              stats$id == "2200" & stats$session == "19" |
+                              stats$id == "2201" & stats$session == "21" |
+                              stats$id == "2202" & stats$session == "14" |
+                              stats$id == "2203" & stats$session == "18" |
+                              stats$id == "2204" & stats$session == "22" |
+                              stats$id == "2205" & stats$session == "16" |
+                              stats$id == "2208" & stats$session == "14" |
+                              stats$id == "2209" & stats$session == "18" |
+                              stats$id == "2210" & stats$session == "13" |
+                              stats$id == "2211" & stats$session == "17" |
+                              stats$id == "2212" & stats$session == "13" |
+                              stats$id == "2213" & stats$session == "18"  , "3", "0")
+```
+
+```{r assign sex}
+# add mouse sex
+# 2174 F, 2181 F, 2182 M, 2183 M, 2185 M, 2191 F, 2195 - 98 M, 2200 - 2204 F4, 2205-06 M, 2208-09 M,2210-13 F 
+stats$sex <- ifelse(stats$id %in% c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213), "F", "M")
+```
+
+```{r}
+# filter for doi/saline sessions with odor on
+doi_saline_stats <- stats %>%
+  filter(doi_dose == 3 | saline_dose == 3, 
+         odor_setting == 0) %>%
+  mutate(condition = case_when(
+    doi_dose == 3 ~ "DOI",
+    saline_dose == 3 ~ "Saline"
+  )) %>%
+  group_by(condition)
+```
+
+```{r}
+# separate groups
+saline_group <- doi_saline_stats[doi_saline_stats$condition == "Saline", ]
+doi_group <- doi_saline_stats[doi_saline_stats$condition == "DOI", ]
+
+# merge by id to ensure pairing
+paired_data <- merge(saline_group, 
+                     doi_group, by = "id", 
+                     suffixes = c("_saline", "_doi"))
+
+# wilcoxon signed-rank test
+wilcox_test_result <- wilcox.test(paired_data$trials_performed_saline, 
+                                  paired_data$trials_performed_doi, 
+                                  paired = TRUE)
+print(wilcox_test_result)
+```
+
+```{r}
+# perform Wilcoxon signed-rank test for each sex group based on either 'sex_saline' or 'sex_doi'
+wilcox_results_sex <- paired_data %>%
+  group_by(sex_saline) %>%
+  summarise(
+    p_value = wilcox.test(trials_performed_saline, 
+                          trials_performed_doi, paired = TRUE)$p.value,
+    statistic = wilcox.test(trials_performed_saline, 
+                            trials_performed_doi, paired = TRUE)$statistic
+  ) %>%
+  rename(sex = sex_saline)
+
+print(wilcox_results_sex)
+```
+
+```{r}
+# convert data to long format for easier plotting
+paired_data_long <- paired_data %>%
+  tidyr::pivot_longer(cols = c(trials_performed_saline, 
+                               trials_performed_doi),
+                      names_to = "condition", 
+                      values_to = "trials_performed") %>%
+  mutate(condition = ifelse(condition == "trials_performed_saline", 
+                            "Saline", 
+                            "DOI"))
+```
+
+```{r}
+# apply jitter manually to the data
+paired_data_long <- paired_data_long %>%
+  mutate(
+    trials_performed_jitter = jitter(trials_performed, amount = 0.1),
+    condition_jitter = jitter(as.numeric(factor(condition)), amount = 0.1)  # jittered x-values, but still keeping them numeric
+  )
+```
+
+```{r df of only trial counts}
+paired_data_wide <- paired_data_long %>%
+  pivot_wider(
+    id_cols = c(id, 
+                sex_doi),
+    names_from = condition, 
+    values_from = trials_performed
+  ) %>% 
+  rename(sex = sex_doi)
+```
+
+```{r}
+group_stats_by_sex <- paired_data_wide %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(DOI, na.rm = TRUE),
+    doi_median = median(DOI, na.rm = TRUE),
+    saline_mean = mean(Saline, na.rm = TRUE),
+    saline_median = median(Saline, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r fig 1D}
+paired_data_wide %>%
+  ggplot(aes(x = Saline, 
+             y = DOI, 
+             shape = sex, 
+             color = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+  
+            #  ADD GROUP MEDIANS
+  geom_point(data = group_stats_by_sex,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big O
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+  
+  scale_color_manual(values = c("M" = "#00B19E", 
+                                "F" = "#990068"), 
+                     guide = "none") +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dotted", 
+              color = "black",
+              size = 1) +
+  labs(title = "Trials performed in 40 min",
+       x = "Saline trials (n)",
+       y = "DOI trials (n)",
+       shape = "Sex") +
+  coord_fixed(ratio = 1) +
+  scale_x_continuous(limits = c(40, 145)) +
+  scale_y_continuous(limits = c(40, 145)) +
+  theme_classic() +
+  theme(legend.position = c(0.15, 0.9),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),  # Increase size of axis titles
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(
+    shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E" )))  # Merge shape & color
+  )
+```
+
+# 1E
+
+```{r}
+# define the IDs and sessions to keep
+keep_ids_sessions <- list(
+  `2174` = c(57, 56),
+  `2181` = c(42, 41),
+  `2182` = c(32, 31),
+  `2183` = c(34, 33),
+  `2185` = c(41, 40),
+  `2191` = c(25, 21),
+  `2195` = c(17, 20),
+  `2196` = c(18, 16),
+  `2197` = c(17, 19),
+  `2198` = c(17, 19),
+  `2200` = c(14, 19),
+  `2201` = c(16, 21),
+  `2202` = c(19, 14),
+  `2203` = c(13, 18),
+  `2204` = c(17, 22),
+  `2205` = c(12, 16),
+  `2208` = c(18, 14),
+  `2209` = c(14, 18),
+  `2210` = c(17, 13),
+  `2211` = c(13, 17),
+  `2212` = c(16, 13),
+  `2213` = c(14, 18)
+)
+
+# vector listing all trial summary files in the directory
+trial_summ <- list.files(path = "D:/newmove", 
+                         recursive = TRUE,
+                         pattern = "trialsummary_falsealarms_softcode_repoke.txt",
+                         full.names = TRUE)
+
+# only paths matching "100-0" condition
+trial_summ_iti <- trial_summ[grep("100-0", trial_summ)]
+
+# check if a file path matches the IDs and sessions to keep
+is_matching_file <- function(path) {
+  # extract mouse ID and session from the file path
+  parts <- strsplit(path, "/")[[1]]
+  id <- parts[3]  
+  session <- as.numeric(parts[5])
+  id %in% names(keep_ids_sessions) && session %in% keep_ids_sessions[[id]]
+}
+
+# filter trial_summ_iti to keep only the matching files
+trial_summ_filtered <- Filter(is_matching_file, trial_summ_iti)
+
+# sort the filtered files numerically
+trial_summ_sorted <- mixedsort(trial_summ_filtered)
+
+# load data from filtered trial summaries
+all_data <- lapply(trial_summ_sorted, read.table, header = FALSE, sep = ",")
+
+# name data frames in all_data based on the directory path
+names(all_data) <- trial_summ_sorted
+
+# column names for each data frame
+colnames <- c("trial", "odor_setting", "odor_side", "success", "tstart", "tend", "set_iti", "false_alarm", "repoke")
+
+# column names to each data frame
+for (i in seq_along(all_data)) {
+  colnames(all_data[[i]]) <- colnames
+}
+
+# calculate trial length and ITI length for each session
+all_data <- lapply(all_data, function(df) {
+  df <- transform(df, trial_length = tend - tstart, iti_length = tstart - dplyr::lag(tend))
+  return(df)
+})
+
+# shift ITI duration up one row for each frame
+shift <- function(x, n) {
+  c(x[-(seq(n))], rep(NA, n))
+}
+
+for (i in seq_along(all_data)) {
+  all_data[[i]]$iti_length <- shift(all_data[[i]]$iti_length, 1)
+}
+```
+
+```{r}
+all_data %>%
+  map(~ .x %>%
+        summarise(
+          trials_performed = n(),
+          repokes = sum(repoke),
+          repoke_rate_pooled = repokes / sum(iti_length, na.rm = TRUE),  # overall rate
+          mean_repoke_rate_per_trial = mean(repoke / iti_length, na.rm = TRUE),  # mean of per-trial repoke rates
+          repoke_rate_total_over_iti_counts = repokes/(trials_performed - 1)
+        )
+      ) ->> full_stats # save to its own variable in environment
+```
+
+```{r converting from large nested list to 1 df}
+# create a list from df of session stats
+stats_list <- do.call(rbind.data.frame, 
+                      full_stats)
+
+# create column that is row names (directory info)
+stats_list <- setDT(stats_list, 
+                    keep.rownames = TRUE)[]
+```
+
+```{r rename columns to grab mouse ID and session}
+# create columns for ID number and session number to make plotting easier
+stats_list %>% 
+  # extract all numeric values from the string
+  mutate(allnums = regmatches(rn, 
+                              gregexpr("+[[:digit:]]+", 
+                                       rn)))%>%
+  # separate them
+  separate(allnums, into = c("id", "session", "idk"), 
+           sep = "\\,") %>%
+  # extract them individually
+  mutate(id = as.numeric(regmatches(id, 
+                                    gregexpr("+[[:digit:]]+", 
+                                             id,))),
+         session = as.numeric(regmatches(session, 
+                                         gregexpr("+[[:digit:]]+", 
+                                                           session)))) %>%
+  select(-idk, -rn) %>% 
+  {. ->> stats}
+```
+
+```{r}
+# extract session numbers from file paths for percent_correct_list
+stats <- stats_list %>%
+  # extract session numbers
+  mutate(
+    id = as.numeric(sub('.*/([0-9]+)/100-0/.*', '\\1', rn)),
+    session = as.numeric(sub('.*/100-0/([0-9]+)/.*', '\\1', rn))
+  ) %>%
+  select(-rn)
+```
+
+```{r doi sessions}
+stats$doi_dose <- ifelse(stats$id == "2174" & stats$session == "57" | 
+                              stats$id == "2181" & stats$session == "42" | 
+                              stats$id == "2182" & stats$session == "32" | 
+                              stats$id == "2183" & stats$session == "34" | 
+                              stats$id == "2185" & stats$session == "41" |
+                              stats$id == "2191" & stats$session == "25" |
+                              stats$id == "2195" & stats$session == "17" |
+                              stats$id == "2196" & stats$session == "18" |
+                              stats$id == "2197" & stats$session == "17" |
+                              stats$id == "2198" & stats$session == "17" |
+                              stats$id == "2200" & stats$session == "14" |
+                              stats$id == "2201" & stats$session == "16" |
+                              stats$id == "2202" & stats$session == "19" |
+                              stats$id == "2203" & stats$session == "13" |
+                              stats$id == "2204" & stats$session == "17" |
+                              stats$id == "2205" & stats$session == "12" |
+                              stats$id == "2208" & stats$session == "18" |
+                              stats$id == "2209" & stats$session == "14" |
+                              stats$id == "2210" & stats$session == "17" |
+                              stats$id == "2211" & stats$session == "13" |
+                              stats$id == "2212" & stats$session == "16" |
+                              stats$id == "2213" & stats$session == "14", "3", "0")
+# if id is 2174 and session is 57 OR
+# id is 2181 and session is 42, etc. dose is 3, otherwise 0
+```
+
+```{r}
+stats$saline_dose <- ifelse(
+                              stats$id == "2174" & stats$session == "56" | 
+                              stats$id == "2181" & stats$session == "41" | 
+                              stats$id == "2182" & stats$session == "31" | 
+                              stats$id == "2183" & stats$session == "33" | 
+                              stats$id == "2185" & stats$session == "40" |
+                              stats$id == "2191" & stats$session == "21" |
+                              stats$id == "2195" & stats$session == "20" |
+                              stats$id == "2196" & stats$session == "16" |
+                              stats$id == "2197" & stats$session == "19" |
+                              stats$id == "2198" & stats$session == "19" |
+                              stats$id == "2200" & stats$session == "19" |
+                              stats$id == "2201" & stats$session == "21" |
+                              stats$id == "2202" & stats$session == "14" |
+                              stats$id == "2203" & stats$session == "18" |
+                              stats$id == "2204" & stats$session == "22" |
+                              stats$id == "2205" & stats$session == "16" |
+                              stats$id == "2208" & stats$session == "14" |
+                              stats$id == "2209" & stats$session == "18" |
+                              stats$id == "2210" & stats$session == "13" |
+                              stats$id == "2211" & stats$session == "17" |
+                              stats$id == "2212" & stats$session == "13" |
+                              stats$id == "2213" & stats$session == "18"  , "3", "0")
+```
+
+```{r assign sex}
+# add mouse sex
+# 2174 F, 2181 F, 2182 M, 2183 M, 2185 M, 2191 F, 2195 - 98 M, 2200 - 2204 F4, 2205-06 M, 2208-09 M,2210-13 F 
+stats$sex <- ifelse(stats$id %in% c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213), "F", "M")
+```
+
+```{r}
+# filter for doi/saline sessions 
+doi_saline_stats <- stats %>%
+  filter(doi_dose == 3 | saline_dose == 3) %>%
+  mutate(condition = case_when(
+    doi_dose == 3 ~ "DOI",
+    saline_dose == 3 ~ "Saline"
+  )) %>%
+  group_by(condition)
+```
+
+```{r}
+doi_saline_stats <- doi_saline_stats[, !names(doi_saline_stats) %in% c("doi_dose", 
+                                                                       "saline_dose")]
+```
+
+```{r}
+repoke_fraction <- doi_saline_stats %>%
+  group_by(id, condition, sex) %>%
+  summarise(
+            repoke_fraction = sum(repoke_rate_total_over_iti_counts, 
+                                  na.rm = TRUE),
+            .groups = "drop") %>%
+  pivot_wider(names_from = condition,
+              values_from = repoke_fraction,
+              names_prefix = "") %>%
+  rename(doi_repoke = DOI, 
+         saline_repoke = Saline)
+```
+
+```{r}
+group_stats_by_sex <- repoke_fraction %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(doi_repoke, na.rm = TRUE),
+    doi_median = median(doi_repoke, na.rm = TRUE),
+    saline_mean = mean(saline_repoke, na.rm = TRUE),
+    saline_median = median(saline_repoke, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r}
+repoke_fraction %>% 
+  ggplot(aes(x = saline_repoke, 
+             y = doi_repoke, 
+             color = sex, 
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+  
+  geom_point(data = group_stats_by_sex,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big O
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+  
+  scale_color_manual(values = c("M" = "#00B19E", 
+                                "F" = "#990068"), 
+                     guide = "none") +
+  geom_abline(slope = 1, 
+              intercept = 0, 
+              linetype = "dotted", 
+              color = "black",
+              size = 1) +
+  labs(title = "Trial initiation attempt rate",
+       x = "Saline pokes per ITI",
+       y = "DOI pokes per ITI",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(0.1, 1.8)) +
+  scale_y_continuous(limits = c(0.1, 1.8)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(
+        text = element_text(size = 20),
+        legend.title = element_blank(),
+        legend.position = c(0.15, 0.9),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),  # Increase size of axis titles
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", 
+                                                            "#00B19E" ))))
+```
+
