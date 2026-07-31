@@ -1,0 +1,683 @@
+---
+title: "Figure 2"
+author: "Amanda Welch"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r import data}
+# mouse id, doi session number, and saline session number for each animal
+mouse_sessions <- data.frame(
+  mouse_id = c(2191, 2195, 2196, 2197, 2198, 2200, 2201, 2202, 2203, 2204, 2205, 2208, 2209, 2210, 2211, 2212, 2213),
+  session_doi = c(25, 17, 18, 17, 17, 14, 16, 19, 13, 17, 12, 18, 14, 17, 13, 16, 14),
+  session_saline = c(21, 20, 16, 19, 19, 19, 21, 14, 18, 22, 16, 14, 18, 13, 17, 13, 18)
+)
+
+# path to the root directory containing the raw session data
+root_directory <- "D:/newmove"
+
+# female mouse ids; all others are male
+# 2174 f, 2181 f, 2182 m, 2183 m, 2185 m, 2191 f, 2195-98 m, 2200-2204 f,
+# 2205-06 m, 2208-09 m, 2210-13 f
+female_ids <- c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213)
+
+# reads one drinking-events file, dropping any malformed "error" lines,
+# and returns a data frame with columns start_time/end_time/duration/odor.
+# returns NULL if the file has no valid rows or fails to parse.
+read_drinking_data <- function(file) {
+  lines <- readLines(file)
+  valid_lines <- lines[!grepl("Error", lines)]
+
+  if (length(valid_lines) == 0) {
+    return(NULL)
+  }
+
+  col_names <- c("start_time", "end_time", "duration", "odor")
+
+  result <- tryCatch({
+    read.table(textConnection(valid_lines), header = FALSE, sep = ",", col.names = col_names)
+  }, error = function(e) {
+    message(sprintf("error reading file with 4 columns: %s", e$message))
+    NULL
+  })
+
+  if (!is.null(result) && nrow(result) > 0) {
+    return(result)
+  } else {
+    message(sprintf("file %s returned null or has no valid rows.", file))
+    return(NULL)
+  }
+}
+
+# loads one drinking-events file per mouse/session (doi + saline) from
+# root_directory/<mouse_id>/100-0/<session>/<file_name>, and returns a
+# named list of data frames (name = "<mouse_id>_<session>")
+load_drinking_data <- function(file_name, mouse_sessions, root_directory) {
+  data_list <- list()
+  file_names <- c()
+
+  for (i in 1:nrow(mouse_sessions)) {
+    mouse_id <- mouse_sessions$mouse_id[i]
+    sessions <- c(mouse_sessions$session_doi[i], mouse_sessions$session_saline[i])
+
+    for (session in sessions) {
+      file_path <- file.path(root_directory, as.character(mouse_id), "100-0", as.character(session), file_name)
+
+      if (file.exists(file_path)) {
+        result <- tryCatch({
+          read_drinking_data(file_path)
+        }, error = function(e) {
+          message(sprintf("error reading file %s: %s", file_path, e$message))
+          NULL
+        })
+
+        if (!is.null(result) && nrow(result) > 0) {
+          data_list <- c(data_list, list(result))
+          file_names <- c(file_names, sprintf("%d_%d", mouse_id, session))
+        } else {
+          message(sprintf("file %s returned null or has no valid rows.", file_path))
+        }
+      } else {
+        message(sprintf("file %s does not exist.", file_path))
+      }
+    }
+  }
+
+  if (length(data_list) > 0) {
+    names(data_list) <- file_names
+  }
+
+  data_list
+}
+
+# combines a named list of per-session drinking-event data frames (as
+# produced by load_drinking_data) into one data frame, tagging each row
+# with condition (doi/saline, based on mouse_sessions), sex, and mouse id.
+# sessions that don't match a doi or saline session for that mouse are
+# dropped.
+combine_drinking_data <- function(data_list, mouse_sessions, female_ids) {
+  rows <- lapply(names(data_list), function(name) {
+    name_parts <- unlist(strsplit(name, "_"))
+    mouse_id <- as.numeric(name_parts[1])
+    session <- as.numeric(name_parts[2])
+
+    condition <- ifelse(
+      session %in% mouse_sessions$session_doi[mouse_sessions$mouse_id == mouse_id], "DOI",
+      ifelse(session %in% mouse_sessions$session_saline[mouse_sessions$mouse_id == mouse_id], "Saline", NA)
+    )
+
+    if (is.na(condition)) {
+      return(NULL)
+    }
+
+    df <- data_list[[name]]
+    df$condition <- condition
+    df$sex <- ifelse(mouse_id %in% female_ids, "F", "M")
+    df$mouse_id <- mouse_id
+    df
+  })
+
+  dplyr::bind_rows(rows)
+}
+```
+
+# Correct trials
+
+```{r load correct trial data}
+drinking_data_correct <- load_drinking_data("drinking_data_iti_2.txt", mouse_sessions, root_directory)
+```
+
+```{r combine correct trial data}
+# combined_correct has one row per drinking event, with condition/sex/mouse_id
+# attached; odor is 0 for odor trials and 3 for omission trials
+combined_correct <- combine_drinking_data(drinking_data_correct, mouse_sessions, female_ids) %>%
+  filter(!is.na(duration))
+```
+
+```{r wilcoxon correct pooled}
+# pooled comparison of drinking duration: doi vs. saline, all odor/omission
+# trials combined
+doi_duration_correct <- combined_correct %>% filter(condition == "DOI") %>% pull(duration)
+saline_duration_correct <- combined_correct %>% filter(condition == "Saline") %>% pull(duration)
+
+wilcox_correct_pooled <- wilcox.test(doi_duration_correct, saline_duration_correct)
+print("wilcoxon rank-sum test result (correct trials, pooled):")
+print(wilcox_correct_pooled)
+```
+
+```{r fig 2a factor}
+# condition_odor separates each condition into odor trials (0) and
+# omission trials (3), for the cumulative frequency plot below
+combined_correct$condition_odor <- interaction(combined_correct$condition, combined_correct$odor, sep = " - ")
+combined_correct$condition_odor <- factor(combined_correct$condition_odor,
+                                          levels = c("DOI - 0", "DOI - 3", "Saline - 0", "Saline - 3"))
+```
+
+```{r fig 2a stats}
+# doi-odor vs. saline-odor and saline-omission
+# kruskal-wallis + bonferroni-corrected pairwise wilcoxon post-hoc
+# across the 4 condition_odor groups.
+kruskal_correct <- kruskal.test(duration ~ condition_odor, data = combined_correct)
+print("kruskal-wallis test result:")
+print(kruskal_correct)
+
+post_hoc_kruskal_correct <- pairwise.wilcox.test(combined_correct$duration,
+                                                  combined_correct$condition_odor,
+                                                  p.adjust.method = "bonferroni")
+print("post-hoc pairwise comparisons (wilcoxon, bonferroni-corrected):")
+print(post_hoc_kruskal_correct)
+```
+
+```{r fig 2a sex effect supplemental}
+# sex effect of condition: kruskal-wallis on duration across the 4-way
+# condition x sex split. not significant, so no post-hoc is reported.
+combined_correct$condition_sex <- interaction(combined_correct$condition, combined_correct$sex, sep = " - ")
+combined_correct$condition_sex <- factor(combined_correct$condition_sex,
+                                         levels = c("DOI - M", "DOI - F", "Saline - M", "Saline - F"))
+
+kruskal_sex_correct <- kruskal.test(duration ~ condition_sex, data = combined_correct)
+print("kruskal-wallis test result:")
+print(kruskal_sex_correct)
+```
+
+# Figure 2A
+
+```{r fig 2a}
+combined_correct %>%
+  ggplot(aes(x = duration,
+             color = condition_odor)) +
+  stat_ecdf(geom = "step",
+            linewidth = 1) +
+  scale_color_manual(
+    values = c("DOI - 0" = "#b876e3",
+               "DOI - 3" = "#53e307",
+               "Saline - 0" = "black",
+               "Saline - 3" = "darkgray"),
+    labels = c("DOI - Odor",
+               "DOI - Omission",
+               "Saline - Odor",
+               "Saline - Omission"),
+    name = "Condition"
+  ) +
+  scale_x_continuous(limits = c(0, 15)) +
+  labs(title = "Reward port duration on correct trials",
+       x = "Time in reward port (s)",
+       y = "Cumulative frequency") +
+  theme_classic() +
+  theme(legend.position = c(0.8, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+```{r fig 2a supplemental by sex}
+combined_correct %>%
+  ggplot(aes(x = duration,
+             color = condition_sex)) +
+  stat_ecdf(geom = "step",
+            linewidth = 1) +
+  scale_color_manual(
+    values = c("DOI - F" = "#b876e3",
+               "DOI - M" = "#53e307",
+               "Saline - F" = "black",
+               "Saline - M" = "darkgray"),
+    name = "Condition"
+  ) +
+  scale_x_continuous(limits = c(0, 15)) +
+  labs(title = "Reward port duration on correct trials",
+       x = "Time in reward port (s)",
+       y = "Cumulative frequency") +
+  theme_classic() +
+  theme(legend.position = c(0.8, 0.15),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+```{r median duration correct}
+# median drinking duration per mouse, split by condition
+median_correct <- combined_correct %>%
+  group_by(mouse_id, sex) %>%
+  summarise(
+    doi_duration = median(duration[condition == "DOI"], na.rm = TRUE),
+    saline_duration = median(duration[condition == "Saline"], na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r wilcoxon correct paired}
+wilcox_correct_paired <- wilcox.test(median_correct$doi_duration,
+                                     median_correct$saline_duration,
+                                     paired = TRUE)
+
+print(wilcox_correct_paired)
+```
+
+```{r median duration correct by odor and omission}
+# 2b supplemental: per-mouse median duration split by trial type
+# (odor vs. omission), not just by condition
+median_correct_by_odor <- combined_correct %>%
+  group_by(mouse_id, sex) %>%
+  summarise(
+    doi_odor = median(duration[condition == "DOI" & odor == 0], na.rm = TRUE),
+    saline_odor = median(duration[condition == "Saline" & odor == 0], na.rm = TRUE),
+    doi_omission = median(duration[condition == "DOI" & odor == 3], na.rm = TRUE),
+    saline_omission = median(duration[condition == "Saline" & odor == 3], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+wilcox_correct_odor <- wilcox.test(median_correct_by_odor$doi_odor,
+                                   median_correct_by_odor$saline_odor,
+                                   paired = TRUE)
+print("odor trials, doi vs. saline (2b supplemental):")
+print(wilcox_correct_odor)
+
+# omission trials: source drops incomplete pairs explicitly here (not every
+# mouse has usable omission-trial drinking events in both conditions)
+wilcox_correct_omission <- wilcox.test(median_correct_by_odor$doi_omission,
+                                       median_correct_by_odor$saline_omission,
+                                       paired = TRUE,
+                                       na.action = na.omit)
+print("omission trials, doi vs. saline (2b supplemental):")
+print(wilcox_correct_omission)
+```
+
+```{r fig 2b supplemental odor plot}
+group_stats_correct_odor <- median_correct_by_odor %>%
+  group_by(sex) %>%
+  summarize(
+    doi_median = median(doi_odor, na.rm = TRUE),
+    saline_median = median(saline_odor, na.rm = TRUE)
+  )
+```
+
+```{r}
+median_correct_by_odor %>%
+  ggplot(aes(x = saline_odor,
+             y = doi_odor,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_correct_odor,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Reward port duration \ncorrect odor trials",
+       x = "Saline median (s)",
+       y = "DOI median (s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(0, 6)) +
+  scale_y_continuous(limits = c(0, 6)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```
+
+```{r group stats correct}
+group_stats_correct <- median_correct %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(doi_duration, na.rm = TRUE),
+    doi_median = median(doi_duration, na.rm = TRUE),
+    saline_mean = mean(saline_duration, na.rm = TRUE),
+    saline_median = median(saline_duration, na.rm = TRUE),
+    n = n()
+  )
+```
+
+# Figure 2B
+
+```{r fig 2b}
+median_correct %>%
+  ggplot(aes(x = saline_duration,
+             y = doi_duration,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_correct,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Reward port duration \ncorrect trials",
+       x = "Saline median (s)",
+       y = "DOI median (s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(0, 6)) +
+  scale_y_continuous(limits = c(0, 6)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5,
+                                  size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))  # merge shape & color
+```
+
+# Incorrect trials
+
+```{r load incorrect trial data}
+drinking_data_incorrect <- load_drinking_data("drinking_data_incorrect_trials_iti_2.txt", mouse_sessions, root_directory)
+```
+
+```{r combine incorrect trial data}
+combined_incorrect <- combine_drinking_data(drinking_data_incorrect, mouse_sessions, female_ids) %>%
+  filter(!is.na(duration))
+```
+
+```{r wilcoxon incorrect pooled}
+doi_duration_incorrect <- combined_incorrect %>% filter(condition == "DOI") %>% pull(duration)
+saline_duration_incorrect <- combined_incorrect %>% filter(condition == "Saline") %>% pull(duration)
+
+wilcox_incorrect_pooled <- wilcox.test(doi_duration_incorrect, saline_duration_incorrect)
+print("wilcoxon rank-sum test result (incorrect trials, pooled):")
+print(wilcox_incorrect_pooled)
+```
+
+```{r fig 2c factor and stats}
+combined_incorrect$condition_odor <- interaction(combined_incorrect$condition, combined_incorrect$odor, sep = " - ")
+combined_incorrect$condition_odor <- factor(combined_incorrect$condition_odor,
+                                            levels = c("DOI - 0", "DOI - 3", "Saline - 0", "Saline - 3"))
+
+kruskal_result <- kruskal.test(duration ~ condition_odor, data = combined_incorrect)
+print("kruskal-wallis test result:")
+print(kruskal_result)
+
+post_hoc_kruskal <- pairwise.wilcox.test(combined_incorrect$duration,
+                                          combined_incorrect$condition_odor,
+                                          p.adjust.method = "bonferroni")
+print("post-hoc pairwise comparisons (wilcoxon, bonferroni-corrected):")
+print(post_hoc_kruskal)
+```
+
+```{r fig 2c sex effect supplemental}
+combined_incorrect$condition_sex <- interaction(combined_incorrect$condition, combined_incorrect$sex, sep = " - ")
+combined_incorrect$condition_sex <- factor(combined_incorrect$condition_sex,
+                                           levels = c("DOI - M", "DOI - F", "Saline - M", "Saline - F"))
+
+kruskal_sex_incorrect <- kruskal.test(duration ~ condition_sex, data = combined_incorrect)
+print("kruskal-wallis test result:")
+print(kruskal_sex_incorrect)
+```
+
+# Figure 2C
+
+```{r fig 2c}
+combined_incorrect %>%
+  ggplot(aes(x = duration,
+             color = condition_odor)) +
+  stat_ecdf(geom = "step",
+            linewidth = 1) +
+  scale_color_manual(
+    values = c("DOI - 0" = "#b876e3",
+               "DOI - 3" = "#53e307",
+               "Saline - 0" = "black",
+               "Saline - 3" = "darkgray"),
+    labels = c("DOI - Odor",
+               "DOI - Omission",
+               "Saline - Odor",
+               "Saline - Omission"),
+    name = "Condition"
+  ) +
+  scale_x_continuous(limits = c(0, 15)) +
+  labs(title = "Reward port duration on incorrect trials",
+       x = "Time in reward port (s)",
+       y = "Cumulative frequency") +
+  theme_classic() +
+  theme(
+      legend.position = c(0.8, 0.15),
+      legend.title = element_blank(),
+      plot.title = element_text(hjust = 0.5, size = 24),
+      legend.text = element_text(size = 20),
+      axis.title = element_text(size = 20),
+      axis.text = element_text(size = 20),
+      axis.line = element_line(linewidth = 1.2))
+```
+
+```{r fig 2c supplemental by sex}
+combined_incorrect %>%
+  ggplot(aes(x = duration,
+             color = condition_sex)) +
+  stat_ecdf(geom = "step",
+            linewidth = 1) +
+  scale_color_manual(
+    values = c("DOI - F" = "#b876e3",
+               "DOI - M" = "#53e307",
+               "Saline - F" = "black",
+               "Saline - M" = "darkgray"),
+    name = "Condition"
+  ) +
+  scale_x_continuous(limits = c(0, 15)) +
+  labs(title = "Reward port duration on incorrect trials",
+       x = "Time in reward port (s)",
+       y = "Cumulative frequency") +
+  theme_classic() +
+  theme(legend.position = c(0.8, 0.15),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+```{r median duration incorrect}
+median_incorrect <- combined_incorrect %>%
+  group_by(mouse_id, sex) %>%
+  summarise(
+    doi_duration = median(duration[condition == "DOI"], na.rm = TRUE),
+    saline_duration = median(duration[condition == "Saline"], na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r group stats incorrect}
+group_stats_incorrect <- median_incorrect %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(doi_duration, na.rm = TRUE),
+    doi_median = median(doi_duration, na.rm = TRUE),
+    saline_mean = mean(saline_duration, na.rm = TRUE),
+    saline_median = median(saline_duration, na.rm = TRUE),
+    n = n()
+  )
+```
+
+# Figure 2D
+
+```{r fig 2d}
+median_incorrect %>%
+  ggplot(aes(x = saline_duration,
+             y = doi_duration,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_incorrect,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Reward port duration \nincorrect trials",
+       x = "Saline median (s)",
+       y = "DOI median (s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(0, 6)) +
+  scale_y_continuous(limits = c(0, 6)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))  # merge shape & color
+```
+
+```{r wilcoxon incorrect paired}
+wilcox_incorrect_paired <- wilcox.test(median_incorrect$doi_duration,
+                                       median_incorrect$saline_duration,
+                                       paired = TRUE,
+                                       na.action = na.omit)
+
+print(wilcox_incorrect_paired)
+```
+
+```{r median duration incorrect by odor and omission}
+# d supplemental: per-mouse median duration split by trial type
+median_incorrect_by_odor <- combined_incorrect %>%
+  group_by(mouse_id, sex) %>%
+  summarise(
+    doi_odor = median(duration[condition == "DOI" & odor == 0], na.rm = TRUE),
+    saline_odor = median(duration[condition == "Saline" & odor == 0], na.rm = TRUE),
+    doi_omission = median(duration[condition == "DOI" & odor == 3], na.rm = TRUE),
+    saline_omission = median(duration[condition == "Saline" & odor == 3], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+wilcox_incorrect_odor <- wilcox.test(median_incorrect_by_odor$doi_odor,
+                                     median_incorrect_by_odor$saline_odor,
+                                     paired = TRUE,
+                                     na.action = na.omit)
+print("odor trials, doi vs. saline (2d supplemental):")
+print(wilcox_incorrect_odor)
+
+# omission trials: reported in the text as p = 0.049
+wilcox_incorrect_omission <- wilcox.test(median_incorrect_by_odor$doi_omission,
+                                         median_incorrect_by_odor$saline_omission,
+                                         paired = TRUE,
+                                         na.action = na.omit)
+print("omission trials, doi vs. saline (2d supplemental):")
+print(wilcox_incorrect_omission)
+```
+
+```{r fig 2d supplemental omission plot}
+group_stats_incorrect_omission <- median_incorrect_by_odor %>%
+  group_by(sex) %>%
+  summarize(
+    doi_median = median(doi_omission, na.rm = TRUE),
+    saline_median = median(saline_omission, na.rm = TRUE)
+  )
+```
+
+```{r}
+median_incorrect_by_odor %>%
+  ggplot(aes(x = saline_omission,
+             y = doi_omission,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_incorrect_omission,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Reward port duration \nincorrect omission trials",
+       x = "Saline median (s)",
+       y = "DOI median (s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(0, 6)) +
+  scale_y_continuous(limits = c(0, 6)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```

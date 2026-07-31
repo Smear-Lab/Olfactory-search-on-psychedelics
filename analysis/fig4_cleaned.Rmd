@@ -1,0 +1,467 @@
+---
+title: "Figure 4"
+author: "amanda welch"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(R.matlab)
+library(gtools)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(coin)
+```
+
+```{r import sniff files}
+dir_path <- "D:\\Task sniff params"
+
+# get a list of all .mat files in the directory
+file_list <- list.files(path = dir_path, pattern = "\\.mat$", full.names = TRUE)
+
+# read each .mat file and convert to a data frame
+sniff_params <- lapply(file_list, function(file) {
+  mat_data <- readMat(file)
+  as.data.frame(mat_data[[1]])
+})
+names(sniff_params) <- basename(file_list)
+
+# name sniff columns
+sniff_col_names <- c("inhale_ms", "inhale_amp", "exhale_ms", "exhale_amp")
+for (i in seq_along(sniff_params)) {
+  colnames(sniff_params[[i]]) <- sniff_col_names
+}
+
+# extract mouse id and session number from a sniff_params file name
+extract_id_session <- function(name) {
+  id <- str_extract(name, "\\d{4}")
+  session <- str_extract(name, "(?<=_)\\d+(?=\\.mat)")
+  list(id = id, session = session)
+}
+```
+
+```{r trial timing lookup}
+# ids/sessions to keep, in "<mouse_id> = c(doi_session, saline_session)" form
+keep_ids_sessions <- list(
+  `2174` = c(57, 56), `2181` = c(42, 41), `2182` = c(32, 31), `2183` = c(34, 33),
+  `2185` = c(41, 40), `2191` = c(25, 21), `2195` = c(17, 20), `2196` = c(18, 16),
+  `2197` = c(17, 19), `2198` = c(17, 19), `2200` = c(14, 19), `2201` = c(16, 21),
+  `2202` = c(19, 14), `2203` = c(13, 18), `2204` = c(17, 22), `2205` = c(12, 16),
+  `2208` = c(18, 14), `2209` = c(14, 18), `2210` = c(17, 13), `2211` = c(13, 17),
+  `2212` = c(16, 13), `2213` = c(14, 18)
+)
+
+is_matching_file <- function(path) {
+  parts <- strsplit(path, "/")[[1]]
+  id <- parts[3]
+  session <- as.numeric(parts[5])
+  id %in% names(keep_ids_sessions) && session %in% keep_ids_sessions[[id]]
+}
+
+# trial-level data (tstart/tend/odor_setting), used below to label each
+# sniff as within-trial (odor/omission) or between-trial (iti)
+trial_summ <- list.files(path = "D:/newmove",
+                         recursive = TRUE,
+                         pattern = "trialsummary.txt",
+                         full.names = TRUE)
+trial_summ_iti <- trial_summ[grep("100-0", trial_summ)]
+trial_summ_filtered <- Filter(is_matching_file, trial_summ_iti)
+trial_summ_sorted <- mixedsort(trial_summ_filtered)
+
+all_data <- lapply(trial_summ_sorted, read.table, header = FALSE, sep = ",")
+names(all_data) <- trial_summ_sorted
+
+trial_col_names <- c("trial", "odor_setting", "odor_side", "success", "tstart", "tend", "set_iti")
+for (i in seq_along(all_data)) {
+  colnames(all_data[[i]]) <- trial_col_names
+}
+
+all_data <- lapply(all_data, function(df) {
+  transform(df, trial_length = tend - tstart, iti_length = tstart - dplyr::lag(tend))
+})
+
+shift <- function(x, n) c(x[-(seq(n))], rep(NA, n))
+for (i in seq_along(all_data)) {
+  all_data[[i]]$iti_length <- shift(all_data[[i]]$iti_length, 1)
+}
+```
+
+```{r label sniffs by trial period}
+for (sniff_name in names(sniff_params)) {
+  sniff_info <- extract_id_session(sniff_name)
+  all_data_name <- paste0("D:/newmove/", sniff_info$id, "/100-0/", sniff_info$session, "/trialsummary.txt")
+  if (!all_data_name %in% names(all_data)) next
+
+  sniff_df <- sniff_params[[sniff_name]]
+  all_data_df <- all_data[[all_data_name]]
+
+  sniff_df <- sniff_df %>%
+    mutate(inhale_sec = inhale_ms / 1000, exhale_sec = exhale_ms / 1000)
+
+  # within_trial: does this sniff's inhale fall inside any trial's tstart-tend window?
+  sniff_df <- sniff_df %>%
+    rowwise() %>%
+    mutate(within_trial = any(inhale_sec >= all_data_df$tstart & inhale_sec <= all_data_df$tend)) %>%
+    mutate(within_trial = ifelse(within_trial, "Within trial", "Between trials")) %>%
+    ungroup()
+
+  # trial_type: for within-trial sniffs, was it an odor (0) or omission (3) trial?
+  sniff_df <- sniff_df %>%
+    mutate(
+      trial_type = case_when(
+        within_trial == "Within trial" ~ {
+          matched_trial <- findInterval(inhale_sec, all_data_df$tstart, rightmost.closed = TRUE)
+          ifelse(
+            matched_trial > 0 & matched_trial <= nrow(all_data_df),
+            ifelse(all_data_df$odor_setting[matched_trial] == 0, "Odor", "Omission"),
+            NA_character_
+          )
+        },
+        within_trial == "Between trials" ~ NA_character_
+      )
+    )
+
+  sniff_params[[sniff_name]] <- sniff_df
+}
+```
+
+```{r split doi and saline}
+doi_conditions <- c(
+  "2174_57", "2181_42", "2182_32", "2183_34", "2185_41",
+  "2191_25", "2195_17", "2196_18", "2197_17", "2198_17",
+  "2200_14", "2201_16", "2202_19", "2203_13", "2204_17",
+  "2205_12", "2208_18", "2209_14", "2210_17", "2211_13",
+  "2212_16", "2213_14"
+)
+
+sniff_params_doi <- list()
+sniff_params_saline <- list()
+
+for (df_name in names(sniff_params)) {
+  df <- sniff_params[[df_name]]
+  mouse_id <- str_extract(df_name, "(?<=sniff_params_sniff_)\\d{4}")
+  session_num <- str_extract(df_name, "(?<=_\\d{4}_)\\d+")
+  identifier <- paste(mouse_id, session_num, sep = "_")
+
+  if (identifier %in% doi_conditions) {
+    sniff_params_doi[[df_name]] <- df
+  } else {
+    sniff_params_saline[[df_name]] <- df
+  }
+}
+
+# rename to "<mouse_id>_<session>"
+names(sniff_params_doi) <- sapply(names(sniff_params_doi), function(name) {
+  sub("sniff_params_sniff_(\\d+_\\d+).mat", "\\1", name)
+})
+names(sniff_params_saline) <- sapply(names(sniff_params_saline), function(name) {
+  sub("sniff_params_sniff_(\\d+_\\d+).mat", "\\1", name)
+})
+```
+
+```{r compute sniff frequency}
+# sniff frequency (hz) = 1000 / time between consecutive inhalations (ms).
+# exhale_ms == 0 rows are dropped first (bad/incomplete sniff detections).
+compute_frequency <- function(sniff_list) {
+  freq_list <- lapply(sniff_list, function(df) {
+    df <- df[df$exhale_ms != 0, ]
+    df <- df[order(df$inhale_ms), ]
+    df$diffs <- c(NA, diff(df$inhale_ms))
+    df <- df[df$diffs > 0, ]
+    df$frequency <- 1000 / df$diffs
+    df
+  })
+  names(freq_list) <- names(sniff_list)
+  freq_list
+}
+
+frequency_list_doi <- compute_frequency(sniff_params_doi)
+frequency_list_saline <- compute_frequency(sniff_params_saline)
+
+# remove faulty mice from analysis: in doi 2198_17 & 2195_17, in saline
+# 2198_19 & 2213_18 - excluded everywhere, including 4a/4b
+frequency_list_doi <- frequency_list_doi[!names(frequency_list_doi) %in% c("2198_17", "2195_17")]
+frequency_list_saline <- frequency_list_saline[!names(frequency_list_saline) %in% c("2198_19", "2213_18")]
+
+combined_doi_data <- bind_rows(
+  lapply(names(frequency_list_doi), function(name) {
+    data.frame(frequency = frequency_list_doi[[name]]$frequency, mouse_id = name)
+  })
+)
+combined_saline_data <- bind_rows(
+  lapply(names(frequency_list_saline), function(name) {
+    data.frame(frequency = frequency_list_saline[[name]]$frequency, mouse_id = name)
+  })
+)
+```
+
+# Figure 4B - individual saline sniff frequencies
+
+```{r fig 4b}
+combined_saline_data %>%
+  ggplot() +
+  geom_density(aes(x = frequency, group = mouse_id), size = 0.5, alpha = 0.7, color = "#858585") +
+  geom_density(aes(x = frequency), size = 1.5, color = "black") +
+  labs(title = "Saline sniff frequencies", x = "Sniff frequency (Hz)") +
+  xlim(-0.5, 16) +
+  ylim(0, 0.17) +
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        text = element_text(size = 20),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+# Figure 4A - individual DOI sniff frequencies
+
+```{r fig 4a}
+combined_doi_data %>%
+  ggplot() +
+  geom_density(aes(x = frequency, group = mouse_id), size = 0.5, alpha = 0.7, color = "#858585") +
+  geom_density(aes(x = frequency), size = 1.5, color = "#a449e2") +
+  labs(title = "DOI sniff frequencies", x = "Sniff frequency (Hz)", y = "Fraction of sniffs") +
+  xlim(-0.5, 16) +
+  ylim(0, 0.17) +
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+# Figure 3/4 supplemental - per-mouse Kolmogorov-Smirnov test
+
+```{r matched data}
+# pairs each mouse's doi and saline sniff-frequency data, for mice with
+# both a usable doi and saline session
+generate_matched_frequencies <- function(doi_list, saline_list) {
+  ids_doi <- sub("_.*", "", names(doi_list))
+  ids_saline <- sub("_.*", "", names(saline_list))
+  common_ids <- intersect(ids_doi, ids_saline)
+
+  combined_data <- data.frame()
+  for (id in common_ids) {
+    doi_name <- names(doi_list)[grepl(paste0("^", id, "_"), names(doi_list))]
+    saline_name <- names(saline_list)[grepl(paste0("^", id, "_"), names(saline_list))]
+
+    if (length(doi_name) > 0 && length(saline_name) > 0) {
+      doi_df <- doi_list[[doi_name]] %>% mutate(condition = "DOI")
+      saline_df <- saline_list[[saline_name]] %>% mutate(condition = "Saline")
+      matched_df <- bind_rows(doi_df, saline_df) %>% mutate(mouse_id = id)
+      combined_data <- bind_rows(combined_data, matched_df)
+    }
+  }
+  combined_data
+}
+
+matched_data <- generate_matched_frequencies(frequency_list_doi, frequency_list_saline)
+matched_data$condition <- factor(matched_data$condition)
+```
+
+```{r ks test per mouse}
+# kolmogorov-smirnov test, doi vs. saline sniff frequency, one-tailed
+# ("less": doi cdf shifted below saline's, i.e. doi frequencies are higher)
+ks_results <- lapply(unique(matched_data$mouse_id), function(mouse) {
+  doi_data <- subset(matched_data, mouse_id == mouse & condition == "DOI")$frequency
+  saline_data <- subset(matched_data, mouse_id == mouse & condition == "Saline")$frequency
+  ks_test <- ks.test(doi_data, saline_data, alternative = "less")
+  data.frame(mouse_id = mouse, p_value = ks_test$p.value, statistic = ks_test$statistic)
+})
+ks_results <- do.call(rbind, ks_results)
+ks_results$significant <- ifelse(ks_results$p_value < 0.05, "Yes", "No")
+print(ks_results)
+```
+
+# Figure 4C - combined sniff frequency distribution
+
+```{r combine frequency lists for pooled stats}
+# combine all doi and all saline sniffs (not just matched mice) into one
+# data frame, for the pooled fisher-pitman tests and 4c/4d/4e below
+frequency_list_doi <- map(frequency_list_doi, ~ mutate(.x, condition = "DOI"))
+frequency_list_saline <- map(frequency_list_saline, ~ mutate(.x, condition = "Saline"))
+
+combined_frequency_data <- bind_rows(
+  map_dfr(frequency_list_doi, ~ .x, .id = "mouse_session"),
+  map_dfr(frequency_list_saline, ~ .x, .id = "mouse_session")
+)
+combined_frequency_data$condition <- factor(combined_frequency_data$condition)
+```
+
+```{r fig 4c}
+# per-mouse density curves averaged into a mean +/- sem trace
+density_df <- combined_frequency_data %>%
+  filter(!is.na(frequency)) %>%
+  group_by(mouse_session, condition) %>%
+  summarize(dens = list(density(frequency, from = 0, to = 16, n = 512)), .groups = "drop") %>%
+  mutate(x = map(dens, "x"), y = map(dens, "y")) %>%
+  unnest(c(x, y))
+
+summary_density <- density_df %>%
+  group_by(condition, x) %>%
+  summarize(mean_y = mean(y), sem_y = sd(y) / sqrt(n()), .groups = "drop")
+```
+
+```{r}
+ggplot(summary_density, aes(x = x, y = mean_y, color = condition, fill = condition)) +
+  geom_ribbon(aes(ymin = mean_y - sem_y, ymax = mean_y + sem_y), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("DOI" = "#a449e2", "Saline" = "black")) +
+  scale_fill_manual(values = c("DOI" = "#a449e2", "Saline" = "black")) +
+  labs(title = "Sniff frequencies", x = "Sniff frequency (Hz)", y = "Density",
+       color = "Condition", fill = "Condition") +
+  xlim(0, 16) +
+  ylim(0, 0.17) +
+  theme_classic() +
+  theme(legend.position = c(0.15, 0.9),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+```{r fig 4a-c stats}
+# headline stat for figures 4a-4c: pooled sniff frequency, doi vs. saline,
+# fisher-pitman permutation test (coin::oneway_test)
+perm_test_result <- oneway_test(
+  frequency ~ condition,
+  data = combined_frequency_data,
+  distribution = approximate(nresample = 10000)
+)
+print(perm_test_result)
+```
+
+# Figure 4D - sniff frequency by trial type
+
+```{r fig 4d}
+density_df_trial_type <- combined_frequency_data %>%
+  filter(!is.na(frequency)) %>%
+  group_by(mouse_session, condition, trial_type) %>%
+  filter(n() > 1) %>%
+  summarize(dens = list(density(frequency, from = 0, to = 16, n = 512)), .groups = "drop") %>%
+  mutate(x = map(dens, "x"), y = map(dens, "y")) %>%
+  unnest(c(x, y))
+
+summary_density_trial_type <- density_df_trial_type %>%
+  group_by(condition, trial_type, x) %>%
+  summarize(mean_y = mean(y), sem_y = sd(y) / sqrt(n()), .groups = "drop")
+```
+
+```{r}
+ggplot(summary_density_trial_type, aes(x = x, y = mean_y, color = condition, fill = condition)) +
+  geom_ribbon(aes(ymin = mean_y - sem_y, ymax = mean_y + sem_y), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("DOI" = "#a449e2", "Saline" = "black")) +
+  scale_fill_manual(values = c("DOI" = "#a449e2", "Saline" = "black")) +
+  labs(title = "Trial type sniff frequencies", x = "Sniff frequency (Hz)", y = "Fraction of sniffs") +
+  xlim(0, 16) +
+  facet_wrap(~ trial_type, labeller = as_labeller(function(x) ifelse(is.na(x), "ITI", x))) +
+  theme_classic() +
+  theme(
+    legend.position = c(0.11, 0.9),
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 24),
+    text = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20),
+    axis.line = element_line(linewidth = 1.2),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 20)
+  )
+```
+
+```{r fig 4d stats}
+# fisher-pitman permutation test, doi vs. saline sniff frequency, for
+# each trial type separately
+filtered_data_odor_perm <- combined_frequency_data %>% filter(trial_type == "Odor")
+perm_test_result_odor <- oneway_test(
+  frequency ~ condition, data = filtered_data_odor_perm,
+  distribution = approximate(nresample = 10000)
+)
+print(perm_test_result_odor)
+
+filtered_data_omission_perm <- combined_frequency_data %>% filter(trial_type == "Omission")
+perm_test_result_omission <- oneway_test(
+  frequency ~ condition, data = filtered_data_omission_perm,
+  distribution = approximate(nresample = 10000)
+)
+print(perm_test_result_omission)
+
+filtered_data_iti_perm <- combined_frequency_data %>% filter(within_trial == "Between trials")
+perm_test_result_iti <- oneway_test(
+  frequency ~ condition, data = filtered_data_iti_perm,
+  distribution = approximate(nresample = 10000)
+)
+print(perm_test_result_iti)
+```
+
+# Figure 4E - median sniff frequency per mouse
+
+```{r fig 4e}
+median_freq <- combined_frequency_data %>%
+  mutate(mouse_id = sub("_.*", "", mouse_session)) %>%
+  group_by(mouse_id, condition) %>%
+  summarise(median_frequency = median(frequency, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = condition, values_from = median_frequency, names_prefix = "median_freq_")
+
+median_freq$sex <- ifelse(median_freq$mouse_id %in% c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213), "F", "M")
+
+group_stats_by_sex <- median_freq %>%
+  group_by(sex) %>%
+  summarize(
+    doi_median = median(median_freq_DOI, na.rm = TRUE),
+    saline_median = median(median_freq_Saline, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r}
+median_freq %>%
+  ggplot(aes(x = median_freq_Saline, y = median_freq_DOI, color = sex, shape = sex)) +
+  geom_point(size = 6, stroke = 1.5, alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_by_sex,
+             aes(x = saline_median, y = doi_median, color = sex),
+             size = 10, shape = 1, stroke = 2.5, inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E", "F" = "#990068"), guide = "none") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black", size = 1) +
+  labs(title = "Median sniff frequency", x = "Saline (Hz)", y = "DOI (Hz)", shape = "Sex") +
+  scale_x_continuous(limits = c(5.8, 9.2)) +
+  scale_y_continuous(limits = c(5.8, 9.2)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```
+
+```{r fig 4e stats}
+result_wilcox_test_medians <- wilcox.test(median_freq$median_freq_DOI,
+                                          median_freq$median_freq_Saline,
+                                          paired = TRUE)
+print(result_wilcox_test_medians)
+```

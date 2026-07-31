@@ -1,0 +1,765 @@
+---
+title: "Figure 3"
+author: "Amanda Welch"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(gtools)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(stringr)
+library(data.table)
+library(ggplot2)
+```
+
+```{r shared setup}
+# mouse id, doi session number, and saline session number for each animal.
+# used throughout 3a-3d, and reshaped into a lookup list for 3c/3d below.
+mouse_sessions <- data.frame(
+  mouse_id = c(2174, 2181, 2182, 2183, 2185, 2191, 2195, 2196, 2197, 2198, 2200, 2201, 2202, 2203, 2204, 2205, 2208, 2209, 2210, 2211, 2212, 2213),
+  session_doi = c(57, 42, 32, 34, 41, 25, 17, 18, 17, 17, 14, 16, 19, 13, 17, 12, 18, 14, 17, 13, 16, 14),
+  session_saline = c(56, 41, 31, 33, 40, 21, 20, 16, 19, 19, 19, 21, 14, 18, 22, 16, 14, 18, 13, 17, 13, 18)
+)
+
+# female mouse ids; all others are male
+# 2174 f, 2181 f, 2182 m, 2183 m, 2185 m, 2191 f, 2195-98 m, 2200-2204 f,
+# 2205-06 m, 2208-09 m, 2210-13 f
+female_ids <- c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213)
+
+# loads every trialsummary.txt under root_directory, keeps only the 100-0
+# condition, drops sessions with < 40 trials or a known N2/odor delivery
+# error, and computes trial_length and iti_length for each remaining
+# session. returns a named list of data frames (name = source file path).
+load_trial_summaries <- function(root_directory = "D:/newmove") {
+  trial_summ <- list.files(path = root_directory,
+                           recursive = TRUE,
+                           pattern = "trialsummary.txt",
+                           full.names = TRUE)
+
+  # 100-0 condition only, sorted numerically so sessions import in order
+  trial_summ_sorted <- mixedsort(trial_summ[grep("100-0", trial_summ)])
+
+  # mouse 2191 session 20 is a blank file (no trials completed); it reads
+  # in as a 0-row data frame and gets dropped by the <40-trial filter below
+  all_data <- lapply(trial_summ_sorted, read.table, header = FALSE, sep = ",")
+  names(all_data) <- trial_summ_sorted
+
+  data_above40trials <- purrr::discard(all_data, ~nrow(.) < 40)
+
+  col_names <- c("trial", "odor_setting", "odor_side", "success", "tstart", "tend", "set_iti")
+  for (i in seq_along(data_above40trials)) {
+    colnames(data_above40trials[[i]]) <- col_names
+  }
+
+  # manually discard sessions with n2/odor delivery errors, per experimenter notes
+  # 2174 session 34: error on left valve - fixed after session
+  # 2174 session 24: n2 not turned on for half of session
+  # 2174 session 92: left n2 had problems
+  # 2185 session 74: left n2 had problems, same day as 2174 session 92
+  excluded <- c(
+    "D:Mouse_2174/iti_intervals/34/trialsummary.txt",
+    "D:Mouse_2174/iti_intervals/24/trialsummary.txt",
+    "D:Mouse_2174/iti_intervals/92/trialsummary.txt",
+    "D:Mouse_2185/iti_intervals/74/trialsummary.txt"
+  )
+  data_above40trials <- data_above40trials[!names(data_above40trials) %in% excluded]
+
+  data_above40trials <- lapply(data_above40trials, transform, trial_length = tend - tstart)
+  data_above40trials <- lapply(data_above40trials, transform, iti_length = tstart - lag(tend))
+
+  # shift iti_length up one row: as computed above, iti_length[i] is the gap
+  # before trial i, but it belongs with the trial that follows the gap
+  shift <- function(x, n) c(x[-(seq(n))], rep(NA, n))
+  for (i in seq_along(data_above40trials)) {
+    data_above40trials[[i]]$iti_length <- shift(data_above40trials[[i]]$iti_length, 1)
+  }
+
+  data_above40trials
+}
+```
+
+# Figure 3A
+
+trial duration on odor trials, DOI vs. saline, paired by mouse.
+
+```{r 3a build stats}
+data_above40trials <- load_trial_summaries()
+
+# per-session summary stats, one row per session
+full_stats <- data_above40trials %>%
+  map(~summarise(group_by(., odor_setting),
+                 trials_performed = length(odor_setting),
+                 avg_trial_length = mean(trial_length),
+                 sd_trial_length = sd(trial_length),
+                 percent_correct = mean(success) * 100))
+
+# collapse the nested list into one data frame, with mouse id and session
+# number pulled from the source file path
+stats_list <- setDT(do.call(rbind.data.frame, full_stats), keep.rownames = TRUE)[]
+stats <- stats_list %>%
+  mutate(
+    id = as.numeric(sub('.*/([0-9]+)/100-0/.*', '\\1', rn)),
+    session = as.numeric(sub('.*/100-0/([0-9]+)/.*', '\\1', rn))
+  ) %>%
+  select(-rn)
+
+# tag each session as doi or saline using the lookup table, and drop any
+# session that isn't one of the two designated dosing sessions per mouse
+stats <- stats %>%
+  mutate(
+    is_doi = mapply(function(i, s) any(mouse_sessions$mouse_id == i & mouse_sessions$session_doi == s), id, session),
+    is_saline = mapply(function(i, s) any(mouse_sessions$mouse_id == i & mouse_sessions$session_saline == s), id, session),
+    sex = ifelse(id %in% female_ids, "F", "M")
+  )
+
+# odor trials (odor_setting == 0) for the main 3a comparison, and omission
+# trials (odor_setting == 3) for the companion comparison reported in the
+# text alongside 3a
+odor_trials <- stats %>% filter(odor_setting == 0, is_doi | is_saline) %>%
+  mutate(condition = ifelse(is_doi, "DOI", "Saline"))
+
+omission_trials <- stats %>% filter(odor_setting == 3, is_doi | is_saline) %>%
+  mutate(condition = ifelse(is_doi, "DOI", "Saline"))
+```
+
+```{r 3a build plot data}
+paired_data_wide_trialdur <- odor_trials %>%
+  select(id, avg_trial_length, condition, sex) %>%
+  tidyr::pivot_wider(
+    names_from = condition,
+    values_from = avg_trial_length,
+    names_prefix = "avg_trial_"
+  )
+
+group_stats_3a <- paired_data_wide_trialdur %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(avg_trial_DOI, na.rm = TRUE),
+    doi_median = median(avg_trial_DOI, na.rm = TRUE),
+    saline_mean = mean(avg_trial_Saline, na.rm = TRUE),
+    saline_median = median(avg_trial_Saline, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r 3a plot}
+paired_data_wide_trialdur %>%
+  ggplot(aes(x = avg_trial_Saline,
+             y = avg_trial_DOI,
+             shape = sex,
+             color = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_3a,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Odor trial duration",
+       x = "Saline duration (s)",
+       y = "DOI duration (s)",
+       shape = "Sex") +
+  coord_fixed(ratio = 1) +
+  scale_x_continuous(limits = c(1.4, 6)) +
+  scale_y_continuous(limits = c(1.4, 6)) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(
+    shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E")))  # merge shape & color
+  )
+```
+
+```{r 3a wilcoxon}
+wilcox_3a <- wilcox.test(paired_data_wide_trialdur$avg_trial_Saline,
+                         paired_data_wide_trialdur$avg_trial_DOI,
+                         paired = TRUE)
+print(wilcox_3a)
+```
+
+trial duration on omission trials, DOI vs. saline - reported alongside
+figure 3a in the text but not plotted as its own panel.
+
+```{r omission trial duration wilcoxon}
+paired_data_wide_omission <- omission_trials %>%
+  select(id, avg_trial_length, condition, sex) %>%
+  tidyr::pivot_wider(
+    names_from = condition,
+    values_from = avg_trial_length,
+    names_prefix = "avg_trial_"
+  )
+
+wilcox_omission <- wilcox.test(paired_data_wide_omission$avg_trial_Saline,
+                               paired_data_wide_omission$avg_trial_DOI,
+                               paired = TRUE)
+print(wilcox_omission)
+```
+
+# Figure 3B
+
+ITI duration, DOI vs. saline, paired by mouse.
+
+```{r 3b build data}
+data_above40trials <- load_trial_summaries()
+
+# split sessions into doi and saline lists by matching each file path's
+# mouse id / session number against mouse_sessions
+extract_id_session <- function(name) {
+  matches <- str_match(name, ".*/(\\d+)/.*/(\\d+)/trialsummary\\.txt$")
+  if (is.na(matches[1])) {
+    return(list(id = NA, session = NA))
+  }
+  list(id = as.numeric(matches[2]), session = as.numeric(matches[3]))
+}
+
+filter_sessions <- function(data_list, session_col) {
+  data_list[
+    sapply(names(data_list), function(name) {
+      parsed <- extract_id_session(name)
+      if (is.na(parsed$id)) {
+        return(FALSE)
+      }
+      any(mouse_sessions$mouse_id == parsed$id & mouse_sessions[[session_col]] == parsed$session)
+    })
+  ]
+}
+
+doi_dfs <- filter_sessions(data_above40trials, "session_doi")
+saline_dfs <- filter_sessions(data_above40trials, "session_saline")
+
+# per-mouse summary stats for each condition
+summarize_trials <- function(df, mouse_id) {
+  df %>%
+    summarise(
+      id = mouse_id,
+      trials_performed = n(),
+      avg_trial_length = mean(trial_length, na.rm = TRUE),
+      sd_trial_length = sd(trial_length, na.rm = TRUE),
+      avg_iti_length = mean(iti_length, na.rm = TRUE),
+      sd_iti_length = sd(iti_length, na.rm = TRUE),
+      percent_correct = mean(success, na.rm = TRUE) * 100,
+      .groups = "drop"
+    )
+}
+
+doi_stats <- map2_df(doi_dfs, names(doi_dfs), ~summarize_trials(.x, extract_id_session(.y)$id))
+saline_stats <- map2_df(saline_dfs, names(saline_dfs), ~summarize_trials(.x, extract_id_session(.y)$id))
+
+combined_stats <- full_join(doi_stats, saline_stats, by = "id", suffix = c("_doi", "_saline")) %>%
+  mutate(sex = ifelse(id %in% female_ids, "F", "M"))
+
+group_stats_3b <- combined_stats %>%
+  group_by(sex) %>%
+  summarize(
+    doi_mean = mean(avg_iti_length_doi, na.rm = TRUE),
+    doi_median = median(avg_iti_length_doi, na.rm = TRUE),
+    saline_mean = mean(avg_iti_length_saline, na.rm = TRUE),
+    saline_median = median(avg_iti_length_saline, na.rm = TRUE),
+    n = n()
+  )
+```
+
+```{r 3b plot}
+combined_stats %>%
+  ggplot(aes(x = avg_iti_length_saline,
+             y = avg_iti_length_doi,
+             shape = sex,
+             color = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_3b,
+             aes(x = saline_median,
+                 y = doi_median,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "ITI duration",
+       x = "Saline duration (s)",
+       y = "DOI duration (s)",
+       shape = "Sex") +
+  coord_fixed(ratio = 1) +
+  scale_x_continuous(limits = c(13, 50)) +
+  scale_y_continuous(limits = c(13, 50)) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(
+    shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E")))  # merge shape & color
+  )
+```
+
+```{r 3b wilcoxon}
+wilcox_3b <- wilcox.test(combined_stats$avg_iti_length_saline,
+                         combined_stats$avg_iti_length_doi,
+                         paired = TRUE)
+print(wilcox_3b)
+```
+
+# Figure 3C and 3D setup
+
+speed during the task (DLC nose tracking), split into within-trial (3c) and
+between-trial/ITI (3d) periods.
+
+```{r include=FALSE}
+library(sp)
+library(imputeTS)
+library(ggplot2)
+library(ggmap)
+library(cowplot)
+library(corrplot)
+library(keras)
+```
+
+```{r dlc pipeline reference, eval=FALSE}
+source('R/DLCAnalyzer_Functions_final_custom.R')
+
+CleanTracking <- function(t, likelihoodcutoff = 0.95, existence.pol = NULL, maxdelta = NULL) {
+  if (!IsTrackingData(t)) stop("Object is not of type TrackingData")
+
+  for (i in 1:length(t$data)) {
+    process <- t$data[[i]]$likelihood < likelihoodcutoff
+
+    if (!is.null(existence.pol)) {
+      process <- process | !point.in.polygon(t$data[[i]]$x, t$data[[i]]$y, existence.pol$x, existence.pol$y)
+    }
+    if (!is.null(maxdelta)) {
+      dx <- c(NA, diff(t$data[[i]]$x))
+      dy <- c(NA, diff(t$data[[i]]$y))
+      delta <- sqrt(dx^2 + dy^2)
+      process <- process | (delta > maxdelta)
+    }
+
+    t$data[[i]]$x[process] <- NA
+    t$data[[i]]$y[process] <- NA
+    t$data[[i]] <- na_interpolation(t$data[[i]])
+  }
+
+  return(t)
+}
+
+pipeline <- function(path) {
+  Tracking <- ReadDLCDataFromCSV(path, fps = 80)
+  Tracking <- CleanTracking(Tracking, likelihoodcutoff = 0.95, maxdelta = 8)
+  Tracking <- OFTAnalysis(Tracking, movement_cutoff = 5, integration_period = 5, points = "Nose")
+  return(Tracking)
+}
+
+RunPipeline_aw <- function(files, path, FUN) {
+  out <- list()
+  for (j in files) {
+    out[[paste(j)]] <- FUN(file.path(path, j))
+  }
+  return(out)
+}
+```
+
+```{r load tracking}
+TrackingAll <- readRDS("D:/R data/TrackingAll.Rds")
+
+# compute frame-to-frame speed (cm/s) from the nose tracking point
+for (name in names(TrackingAll)) {
+  df <- TrackingAll[[name]][["data"]][["Nose"]]
+
+  delta_x <- c(NA, diff(df$x))
+  delta_y <- c(NA, diff(df$y))
+  delta_frame <- c(NA, diff(df$frame))  # should be 1 if no dropped frames
+
+  df$speed_aw <- sqrt(delta_x^2 + delta_y^2) * 80 / delta_frame  # px/s (80 fps)
+  df$speed_aw_cm <- df$speed_aw * 0.0237  # px-to-cm conversion factor
+
+  TrackingAll[[name]][["data"]][["Nose"]] <- df
+}
+```
+
+```{r split doi and saline tracking}
+# pulls the nose-tracking data frame for one mouse/session/condition out of
+# TrackingAll (named "<mouse_id>_<session>_<condition>.csv")
+get_nose_tracking <- function(tracking_all, mouse_id, session, condition) {
+  file_name <- paste0(mouse_id, "_", session, "_", condition, ".csv")
+  tracking_data <- tracking_all[[file_name]]
+  if (is.null(tracking_data) || is.null(tracking_data$data$Nose)) {
+    return(NULL)
+  }
+  tracking_data$data$Nose
+}
+
+doi_tracking_data <- list()
+saline_tracking_data <- list()
+
+for (file_name in names(TrackingAll)) {
+  parts <- strsplit(file_name, "_")[[1]]
+  mouse_id <- parts[1]
+  session <- parts[2]
+
+  if (grepl("_doi\\.csv$", file_name, ignore.case = TRUE)) {
+    doi_tracking_data[[file_name]] <- get_nose_tracking(TrackingAll, mouse_id, session, "doi")
+  } else if (grepl("_saline\\.csv$", file_name, ignore.case = TRUE)) {
+    saline_tracking_data[[file_name]] <- get_nose_tracking(TrackingAll, mouse_id, session, "saline")
+  }
+}
+```
+
+```{r trial timing lookup}
+# ids/sessions to keep, in the "<mouse_id> = c(doi_session, saline_session)"
+# form needed for file-path matching below (derived from mouse_sessions)
+keep_ids_sessions <- setNames(
+  lapply(seq_len(nrow(mouse_sessions)), function(i) {
+    c(mouse_sessions$session_doi[i], mouse_sessions$session_saline[i])
+  }),
+  as.character(mouse_sessions$mouse_id)
+)
+
+is_matching_file <- function(path) {
+  parts <- strsplit(path, "/")[[1]]
+  id <- parts[3]
+  session <- as.numeric(parts[5])
+  id %in% names(keep_ids_sessions) && session %in% keep_ids_sessions[[id]]
+}
+
+# trial-level data (tstart/tend/odor_setting) for the doi/saline sessions
+# only, used below to label each tracking frame as within- or
+# between-trial
+trial_summ <- list.files(path = "D:/newmove",
+                         recursive = TRUE,
+                         pattern = "trialsummary.txt",
+                         full.names = TRUE)
+trial_summ_iti <- trial_summ[grep("100-0", trial_summ)]
+trial_summ_filtered <- Filter(is_matching_file, trial_summ_iti)
+trial_summ_sorted <- mixedsort(trial_summ_filtered)
+
+trial_data_lookup <- lapply(trial_summ_sorted, read.table, header = FALSE, sep = ",")
+names(trial_data_lookup) <- trial_summ_sorted
+
+col_names <- c("trial", "odor_setting", "odor_side", "success", "tstart", "tend", "set_iti")
+for (i in seq_along(trial_data_lookup)) {
+  colnames(trial_data_lookup[[i]]) <- col_names
+}
+
+trial_data_lookup <- lapply(trial_data_lookup, function(df) {
+  transform(df, trial_length = tend - tstart, iti_length = tstart - dplyr::lag(tend))
+})
+
+shift <- function(x, n) c(x[-(seq(n))], rep(NA, n))
+for (i in seq_along(trial_data_lookup)) {
+  trial_data_lookup[[i]]$iti_length <- shift(trial_data_lookup[[i]]$iti_length, 1)
+}
+```
+
+```{r label trial periods}
+# labels each tracking frame with the trial period it falls in:
+# "Odor" (odor_setting == 0), "Omission" (odor_setting == 3), or
+# "Between trials" (default, outside any trial's tstart-tend window).
+# trial_label_pooled collapses Odor + Omission into "Within trial", for
+# the pooled-trial-type comparisons used in figures 3c/3d.
+add_trial_label <- function(tracking_data, trial_data) {
+  tracking_data$trial_label <- "Between trials"
+
+  if (nrow(trial_data) > 0) {
+    timestamps <- (1:nrow(tracking_data)) / 80  # frame index -> time (s)
+
+    for (i in 1:nrow(trial_data)) {
+      in_trial <- timestamps >= trial_data$tstart[i] & timestamps <= trial_data$tend[i]
+      label <- if (trial_data$odor_setting[i] == 3) "Omission" else "Odor"
+      tracking_data$trial_label[in_trial] <- label
+    }
+  }
+
+  tracking_data$trial_label_pooled <- ifelse(tracking_data$trial_label %in% c("Odor", "Omission"),
+                                             "Within trial", "Between trials")
+  tracking_data
+}
+
+label_all_trial_periods <- function(tracking_list, trial_lookup) {
+  for (i in seq_along(tracking_list)) {
+    file_name <- names(tracking_list)[i]
+    parts <- strsplit(file_name, "_")[[1]]
+    mouse_id <- parts[1]
+    session <- parts[2]
+
+    trial_data_key <- paste0("D:/newmove/", mouse_id, "/100-0/", session, "/trialsummary.txt")
+
+    if (trial_data_key %in% names(trial_lookup)) {
+      tracking_list[[i]] <- add_trial_label(tracking_list[[i]], trial_lookup[[trial_data_key]])
+    } else {
+      message(paste("warning: no trial data for", trial_data_key))
+      tracking_list[[i]]$trial_label <- "Between trials"
+      tracking_list[[i]]$trial_label_pooled <- "Between trials"
+    }
+  }
+  tracking_list
+}
+
+doi_tracking_data_processed <- label_all_trial_periods(doi_tracking_data, trial_data_lookup)
+saline_tracking_data_processed <- label_all_trial_periods(saline_tracking_data, trial_data_lookup)
+```
+
+```{r build speed comparison}
+mouse_ids <- substr(names(doi_tracking_data), 1, 4)
+
+# per-mouse mean speed_aw_cm (excluding tracking artifacts above 160 cm/s),
+# for each condition x trial-period combination. "Within"/"Between" here
+# use the pooled (odor + omission combined) label, for figures 3c/3d.
+speed_comparison <- data.frame(Mouse_ID = mouse_ids,
+                               Mean_Speed_DOI_Within = NA,
+                               Mean_Speed_DOI_Between = NA,
+                               Mean_Speed_Saline_Within = NA,
+                               Mean_Speed_Saline_Between = NA)
+
+# per-mouse mean speed by detailed trial period (odor / omission / between),
+# for the odor-vs-omission-vs-iti comparisons reported alongside 3c/3d
+speed_comparison_detail <- data.frame(Mouse_ID = mouse_ids,
+                                      Mean_Speed_DOI_Odor = NA,
+                                      Mean_Speed_DOI_Omission = NA,
+                                      Mean_Speed_DOI_Between = NA,
+                                      Mean_Speed_Saline_Odor = NA,
+                                      Mean_Speed_Saline_Omission = NA,
+                                      Mean_Speed_Saline_Between = NA)
+
+for (i in seq_along(mouse_ids)) {
+  doi_filtered <- doi_tracking_data_processed[[i]][doi_tracking_data_processed[[i]]$speed_aw_cm <= 160, ]
+  saline_filtered <- saline_tracking_data_processed[[i]][saline_tracking_data_processed[[i]]$speed_aw_cm <= 160, ]
+
+  speed_comparison[i, "Mean_Speed_DOI_Within"] <- mean(doi_filtered[doi_filtered$trial_label_pooled == "Within trial", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison[i, "Mean_Speed_DOI_Between"] <- mean(doi_filtered[doi_filtered$trial_label_pooled == "Between trials", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison[i, "Mean_Speed_Saline_Within"] <- mean(saline_filtered[saline_filtered$trial_label_pooled == "Within trial", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison[i, "Mean_Speed_Saline_Between"] <- mean(saline_filtered[saline_filtered$trial_label_pooled == "Between trials", "speed_aw_cm"], na.rm = TRUE)
+
+  speed_comparison_detail[i, "Mean_Speed_DOI_Odor"] <- mean(doi_filtered[doi_filtered$trial_label == "Odor", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison_detail[i, "Mean_Speed_DOI_Omission"] <- mean(doi_filtered[doi_filtered$trial_label == "Omission", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison_detail[i, "Mean_Speed_DOI_Between"] <- mean(doi_filtered[doi_filtered$trial_label == "Between trials", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison_detail[i, "Mean_Speed_Saline_Odor"] <- mean(saline_filtered[saline_filtered$trial_label == "Odor", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison_detail[i, "Mean_Speed_Saline_Omission"] <- mean(saline_filtered[saline_filtered$trial_label == "Omission", "speed_aw_cm"], na.rm = TRUE)
+  speed_comparison_detail[i, "Mean_Speed_Saline_Between"] <- mean(saline_filtered[saline_filtered$trial_label == "Between trials", "speed_aw_cm"], na.rm = TRUE)
+}
+
+speed_comparison$sex <- ifelse(speed_comparison$Mouse_ID %in% female_ids, "F", "M")
+speed_comparison_detail$sex <- ifelse(speed_comparison_detail$Mouse_ID %in% female_ids, "F", "M")
+
+group_stats_speed <- speed_comparison %>%
+  group_by(sex) %>%
+  summarize(
+    doi_within = median(Mean_Speed_DOI_Within, na.rm = TRUE),
+    doi_between = median(Mean_Speed_DOI_Between, na.rm = TRUE),
+    saline_within = median(Mean_Speed_Saline_Within, na.rm = TRUE),
+    saline_between = median(Mean_Speed_Saline_Between, na.rm = TRUE),
+    n = n()
+  )
+```
+
+# Figure 3C
+
+```{r 3c plot}
+speed_comparison %>%
+  ggplot(aes(x = Mean_Speed_Saline_Within,
+             y = Mean_Speed_DOI_Within,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_speed,
+             aes(x = saline_within,
+                 y = doi_within,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Speed within trial",
+       x = "Saline speed (cm/s)",
+       y = "DOI speed (cm/s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(3.5, 13)) +
+  scale_y_continuous(limits = c(3.5, 13)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```
+
+```{r 3c wilcoxon}
+wilcox_3c <- wilcox.test(speed_comparison$Mean_Speed_DOI_Within,
+                         speed_comparison$Mean_Speed_Saline_Within,
+                         paired = TRUE)
+print(wilcox_3c)
+```
+
+# Figure 3D
+
+```{r 3d plot}
+speed_comparison %>%
+  ggplot(aes(x = Mean_Speed_Saline_Between,
+             y = Mean_Speed_DOI_Between,
+             color = sex,
+             shape = sex)) +
+  geom_point(size = 6,
+             stroke = 1.5,
+             alpha = 0.8) +
+
+  # add group medians
+  geom_point(data = group_stats_speed,
+             aes(x = saline_between,
+                 y = doi_between,
+                 color = sex),
+             size = 10,
+             shape = 1,   # big o
+             stroke = 2.5,
+             inherit.aes = FALSE) +
+
+  scale_color_manual(values = c("M" = "#00B19E",
+                                "F" = "#990068"),
+                     guide = "none") +
+  geom_abline(slope = 1,
+              intercept = 0,
+              linetype = "dotted",
+              color = "black",
+              size = 1) +
+  labs(title = "Speed during ITI",
+       x = "Saline speed (cm/s)",
+       y = "DOI speed (cm/s)",
+       shape = "Sex") +
+  scale_x_continuous(limits = c(3.5, 13)) +
+  scale_y_continuous(limits = c(3.5, 13)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```
+
+```{r 3d wilcoxon}
+wilcox_3d <- wilcox.test(speed_comparison$Mean_Speed_DOI_Between,
+                         speed_comparison$Mean_Speed_Saline_Between,
+                         paired = TRUE)
+print(wilcox_3d)
+```
+
+# Figure supplemental
+
+```{r all pairwise speed comparisons}
+library(gt)
+
+speed_columns <- c("Mean_Speed_DOI_Odor", "Mean_Speed_DOI_Omission", "Mean_Speed_DOI_Between",
+                   "Mean_Speed_Saline_Odor", "Mean_Speed_Saline_Omission", "Mean_Speed_Saline_Between")
+
+# every pairwise combination of the six speed columns, each as a paired
+# wilcoxon test (same mice measured under every condition/trial-period)
+speed_comparisons <- combn(speed_columns, 2, simplify = FALSE)
+
+speed_wilcox_results <- map(speed_comparisons, ~ wilcox.test(
+  speed_comparison_detail[[.x[1]]],
+  speed_comparison_detail[[.x[2]]],
+  paired = TRUE
+))
+names(speed_wilcox_results) <- map_chr(speed_comparisons, ~ paste(.x, collapse = " vs "))
+
+speed_wilcox_results
+```
+
+```{r speed comparisons summary table}
+# tidy summary, sorted by p-value, with cleaned-up comparison labels and
+# significance stars
+speed_wilcox_summary <- map2_df(speed_comparisons, speed_wilcox_results, ~ tibble(
+  Comparison = paste(.x, collapse = " vs "),
+  V_statistic = .y$statistic,
+  P_value = .y$p.value
+)) %>%
+  arrange(P_value) %>%
+  mutate(
+    Comparison = str_replace_all(Comparison, "Mean_Speed_", ""),
+    Comparison = str_replace_all(Comparison, "Between", "ITI"),
+    Comparison = str_replace_all(Comparison, "Odor", "odor"),
+    Comparison = str_replace_all(Comparison, "Omission", "omission"),
+    Comparison = str_replace_all(Comparison, "_", " "),
+    Significance = case_when(
+      P_value < 0.001 ~ "***",
+      P_value < 0.01  ~ "**",
+      P_value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+speed_table <- speed_wilcox_summary %>%
+  gt() %>%
+  fmt_number(columns = c(V_statistic, P_value), decimals = 4) %>%
+  tab_header(
+    title = "Speed comparisons"
+  ) %>%
+  cols_label(
+    Comparison   = "Comparison",
+    V_statistic  = "V",
+    P_value      = "P-value",
+    Significance = "Sig."
+  ) %>%
+  tab_options(
+    table.font.size = "medium",
+    heading.title.font.size = "large"
+  )
+
+speed_table
+```

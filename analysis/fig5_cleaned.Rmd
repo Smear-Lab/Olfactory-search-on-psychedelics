@@ -1,0 +1,609 @@
+---
+title: "Figure 5"
+author: "Amanda Welch"
+output: html_document
+---
+
+this file produces the data (as csvs) and statistics for figure 5
+(occupancy and head-twitch response location/rate). plotting is done
+separately in occupancy_grandmean_gaussian.mlx (matlab) - this script
+only writes the csvs that script reads in, plus runs the reported stats.
+r and matlab code are kept in separate files intentionally.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(ggbeeswarm)
+
+# libraries used by the DLCAnalyzer package (sourced below)
+library(sp)
+library(imputeTS)
+library(ggmap)
+library(cowplot)
+library(corrplot)
+library(keras)
+library(data.table)
+```
+
+# tracking, speed, and trial-period labeling
+
+```{r shared setup}
+mouse_sessions <- data.frame(
+  mouse_id = c(2174, 2181, 2182, 2183, 2185, 2191, 2195, 2196, 2197, 2198, 2200, 2201, 2202, 2203, 2204, 2205, 2208, 2209, 2210, 2211, 2212, 2213),
+  session_doi = c(57, 42, 32, 34, 41, 25, 17, 18, 17, 17, 14, 16, 19, 13, 17, 12, 18, 14, 17, 13, 16, 14),
+  session_saline = c(56, 41, 31, 33, 40, 21, 20, 16, 19, 19, 19, 21, 14, 18, 22, 16, 14, 18, 13, 17, 13, 18)
+)
+
+# female mouse ids; all others are male
+female_ids <- c(2174, 2181, 2191, 2200, 2201, 2202, 2203, 2204, 2210, 2211, 2212, 2213)
+
+# 1st 5 mice (recorded on an earlier camera setup) are flipped on x-coord
+flip_ids <- c("2174", "2181", "2182", "2183", "2185")
+
+source("C:/Users/Amanda Welch/Desktop/Ph.D. Program/Lab/Code/DLCAnalyzer-master/R/DLCAnalyzer_Functions_final_custom.R")
+
+TrackingAll <- readRDS("D:/R data/TrackingAll.Rds")
+
+# compute frame-to-frame speed (cm/s) from the nose tracking point
+for (name in names(TrackingAll)) {
+  df <- TrackingAll[[name]][["data"]][["Nose"]]
+  delta_x <- c(NA, diff(df$x))
+  delta_y <- c(NA, diff(df$y))
+  delta_frame <- c(NA, diff(df$frame))
+  df$speed_aw <- sqrt(delta_x^2 + delta_y^2) * 80 / delta_frame
+  df$speed_aw_cm <- df$speed_aw * 0.0237
+  TrackingAll[[name]][["data"]][["Nose"]] <- df
+}
+
+get_nose_tracking <- function(tracking_all, mouse_id, session, condition) {
+  file_name <- paste0(mouse_id, "_", session, "_", condition, ".csv")
+  tracking_data <- tracking_all[[file_name]]
+  if (is.null(tracking_data) || is.null(tracking_data$data$Nose)) return(NULL)
+  tracking_data$data$Nose
+}
+
+doi_tracking_data <- list()
+saline_tracking_data <- list()
+for (file_name in names(TrackingAll)) {
+  parts <- strsplit(file_name, "_")[[1]]
+  mouse_id <- parts[1]
+  session <- parts[2]
+  if (grepl("_doi\\.csv$", file_name, ignore.case = TRUE)) {
+    doi_tracking_data[[file_name]] <- get_nose_tracking(TrackingAll, mouse_id, session, "doi")
+  } else if (grepl("_saline\\.csv$", file_name, ignore.case = TRUE)) {
+    saline_tracking_data[[file_name]] <- get_nose_tracking(TrackingAll, mouse_id, session, "saline")
+  }
+}
+
+# trial-level data (tstart/tend/odor_setting), used to label frames
+keep_ids_sessions <- setNames(
+  lapply(seq_len(nrow(mouse_sessions)), function(i) c(mouse_sessions$session_doi[i], mouse_sessions$session_saline[i])),
+  as.character(mouse_sessions$mouse_id)
+)
+is_matching_file <- function(path) {
+  parts <- strsplit(path, "/")[[1]]
+  id <- parts[3]
+  session <- as.numeric(parts[5])
+  id %in% names(keep_ids_sessions) && session %in% keep_ids_sessions[[id]]
+}
+
+trial_summ <- list.files(path = "D:/newmove", recursive = TRUE, pattern = "trialsummary.txt", full.names = TRUE)
+trial_summ_iti <- trial_summ[grep("100-0", trial_summ)]
+trial_summ_filtered <- Filter(is_matching_file, trial_summ_iti)
+trial_summ_sorted <- gtools::mixedsort(trial_summ_filtered)
+
+trial_data_lookup <- lapply(trial_summ_sorted, read.table, header = FALSE, sep = ",")
+names(trial_data_lookup) <- trial_summ_sorted
+trial_col_names <- c("trial", "odor_setting", "odor_side", "success", "tstart", "tend", "set_iti")
+for (i in seq_along(trial_data_lookup)) colnames(trial_data_lookup[[i]]) <- trial_col_names
+trial_data_lookup <- lapply(trial_data_lookup, function(df) {
+  transform(df, trial_length = tend - tstart, iti_length = tstart - dplyr::lag(tend))
+})
+shift <- function(x, n) c(x[-(seq(n))], rep(NA, n))
+for (i in seq_along(trial_data_lookup)) trial_data_lookup[[i]]$iti_length <- shift(trial_data_lookup[[i]]$iti_length, 1)
+
+# labels each tracking frame "Within trial" or "Between trials"
+add_trial_label <- function(tracking_data, trial_data) {
+  tracking_data$trial_label <- "Between trials"
+  if (nrow(trial_data) > 0) {
+    timestamps <- (1:nrow(tracking_data)) / 80
+    for (i in 1:nrow(trial_data)) {
+      in_trial <- timestamps >= trial_data$tstart[i] & timestamps <= trial_data$tend[i]
+      tracking_data$trial_label[in_trial] <- "Within trial"
+    }
+  }
+  tracking_data
+}
+
+label_all_trial_periods <- function(tracking_list, trial_lookup) {
+  for (i in seq_along(tracking_list)) {
+    file_name <- names(tracking_list)[i]
+    parts <- strsplit(file_name, "_")[[1]]
+    mouse_id <- parts[1]
+    session <- parts[2]
+    trial_data_key <- paste0("D:/newmove/", mouse_id, "/100-0/", session, "/trialsummary.txt")
+    if (trial_data_key %in% names(trial_lookup)) {
+      tracking_list[[i]] <- add_trial_label(tracking_list[[i]], trial_lookup[[trial_data_key]])
+    } else {
+      tracking_list[[i]]$trial_label <- "Between trials"
+    }
+  }
+  tracking_list
+}
+
+doi_tracking_data_processed <- label_all_trial_periods(doi_tracking_data, trial_data_lookup)
+saline_tracking_data_processed <- label_all_trial_periods(saline_tracking_data, trial_data_lookup)
+```
+
+# HTR event import and matching
+
+```{r import htr timestamps}
+# htr timestamps from two sources: automated detection ("D:/Time Stamps
+# Task") and manually-scored files ("D:/Time Stamps Task Logan")
+read_htr_timestamps <- function(file) {
+  raw_data <- readBin(file, "raw", file.info(file)$size)
+  if (length(raw_data) >= 2 && raw_data[1] == 0xff && raw_data[2] == 0xfe) {
+    raw_data <- raw_data[-(1:2)]
+  } else if (length(raw_data) >= 2 && raw_data[1] == 0xfe && raw_data[2] == 0xff) {
+    raw_data <- raw_data[-(1:2)]
+  }
+  raw_data <- raw_data[raw_data != 0]
+  text_data <- rawToChar(raw_data)
+  tmp_file <- tempfile()
+  writeLines(text_data, tmp_file)
+  read.csv(tmp_file, header = FALSE, col.names = "Timestamp", stringsAsFactors = FALSE)
+}
+
+htr_list <- list.files(path = "D:/Time Stamps Task", pattern = "*.csv", full.names = TRUE)
+htr_data <- lapply(htr_list, read_htr_timestamps)
+names(htr_data) <- basename(htr_list)
+
+# convert HH:MM:SS:MS timestamp strings to seconds
+convert_to_seconds <- function(timestamp) {
+  time_parts <- strsplit(timestamp, ":")[[1]]
+  ms <- if (length(time_parts) == 4) as.numeric(strsplit(time_parts[4], "\\.")[[1]][1]) else 0
+  as.numeric(time_parts[1]) * 3600 + as.numeric(time_parts[2]) * 60 + as.numeric(time_parts[3]) + ms / 1000
+}
+
+htr_seconds <- lapply(htr_data, function(df) {
+  df[] <- lapply(df, function(col) {
+    if (is.character(col) && grepl(":", col[1])) return(sapply(col, convert_to_seconds))
+    col
+  })
+  df
+})
+
+# manually-scored htr files (already in seconds)
+logan_paths <- list.files("D:/Time Stamps Task Logan", full.names = TRUE)
+logan_names <- basename(logan_paths)
+logan_htr <- setNames(lapply(logan_paths, function(f) {
+  df <- read.csv(f)
+  colnames(df) <- "Timestamp"
+  df
+}), logan_names)
+
+htr_seconds <- c(logan_htr, htr_seconds)
+```
+
+```{r mark htr frames}
+# tags each tracking frame "yes"/"no" for whether an htr occurred on it
+# (nearest tracking frame to each htr timestamp)
+mark_htr_frames <- function(tracking_data, htr_data) {
+  if (!"time" %in% colnames(tracking_data)) {
+    tracking_data$time <- (1:nrow(tracking_data)) / 80
+  }
+  tracking_data <- tracking_data %>% mutate(htr = "no")
+  closest_indices <- map_int(htr_data$Timestamp, function(htr_time) {
+    which.min(abs(tracking_data$time - htr_time))
+  })
+  tracking_data$htr[closest_indices] <- "yes"
+  tracking_data
+}
+
+processed_tracking_data <- list()
+for (tracking_list in list(doi_tracking_data_processed, saline_tracking_data_processed)) {
+  for (filename in names(tracking_list)) {
+    mouse_id_session <- sub("_(doi|saline)\\.csv$", "", filename)
+    lookup_name <- paste0(mouse_id_session, ".csv")
+    if (!lookup_name %in% names(htr_seconds)) next
+
+    htr_df <- htr_seconds[[lookup_name]]
+    if (!is.data.frame(htr_df) || !"Timestamp" %in% colnames(htr_df)) next
+
+    tracking_data <- tracking_list[[filename]]
+    if (!is.data.frame(tracking_data) || nrow(tracking_data) == 0) next
+
+    tryCatch({
+      processed_tracking_data[[filename]] <- mark_htr_frames(tracking_data, htr_df)
+    }, error = function(e) {
+      message(paste("error processing", filename, ":", e$message))
+    })
+  }
+}
+```
+
+```{r split and flip}
+# split into doi/saline (only mice with matched htr timestamp files), and
+# flip x-coordinates for the 5 mice recorded on the earlier camera setup
+flip_x <- function(tracking_list) {
+  lapply(names(tracking_list), function(name) {
+    df <- tracking_list[[name]]
+    if (gsub("_.*", "", name) %in% flip_ids) df$x <- 1200 - df$x
+    df
+  }) %>% setNames(names(tracking_list))
+}
+
+tracking_doi <- flip_x(processed_tracking_data[grepl("doi.csv$", names(processed_tracking_data))])
+tracking_saline <- flip_x(processed_tracking_data[grepl("saline.csv$", names(processed_tracking_data))])
+
+# htr-only frames (figure 5c), and full long-format frames (figure 5d
+# occupancy-normalized htr map), both source-tagged by mouse_session
+tracking_doi_combined <- bind_rows(lapply(tracking_doi, filter, htr == "yes"), .id = "source")
+tracking_saline_combined <- bind_rows(lapply(tracking_saline, filter, htr == "yes"), .id = "source")
+
+tracking_doi_long <- bind_rows(tracking_doi, .id = "source")
+tracking_saline_long <- bind_rows(tracking_saline, .id = "source")
+```
+
+# Figure 5C - nose location at HTR onset
+
+```{r fig 5c}
+tracking_doi_combined %>%
+  ggplot(aes(x = x, 
+             y = y, 
+             color = trial_label)) +
+  geom_point(size = 2, 
+             alpha = 0.7) +
+  ggtitle("Nose location at HTR onset") +
+  theme_classic() +
+  scale_color_manual(values = c("Between trials" = "#30acea", 
+                                "Within trial" = "#5f009c"),
+                     labels = c("Between trials" = "ITI", 
+                                "Within trial" = "Within trial")) +
+  theme(axis.title  = element_blank(),
+        axis.text   = element_blank(),
+        axis.ticks  = element_blank(),
+        axis.line   = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 20),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.position = "bottom")
+```
+
+# Figure 5D and occupancy-normalized HTR maps
+
+```{r htr raw binned counts}
+# figure 5d: raw htr counts per bin (~2.5 cm bins), pooled across all doi
+# mice - not yet normalized by occupancy
+bin_size <- 100  # pixels; ~2.5 cm given the 0.0237 cm/px conversion
+
+tracking_doi_combined_nonzero <- tracking_doi_combined %>%
+  mutate(x = ifelse(x < 0, 0, x), y = ifelse(y < 0, 0, y),
+         x_bin = floor(x / bin_size) * bin_size,
+         y_bin = floor(y / bin_size) * bin_size)
+
+htr_density_nonzero_filtered <- tracking_doi_combined_nonzero %>%
+  group_by(x_bin, y_bin) %>%
+  summarise(htr_count = sum(htr == "yes"), .groups = "drop") %>%
+  filter(x_bin != 1200, y_bin != 700)  # exclude bins right at the arena edge
+
+write.csv(htr_density_nonzero_filtered, "D:/R data/htr_binned.csv", row.names = FALSE)
+```
+
+```{r htr normalized by occupancy per mouse}
+# occupancy-normalize htr rate (htr/min) per mouse per bin, then average
+# across mice - separately for all frames, within-trial, and iti
+bin_width <- 100
+
+tracking_doi_long_nonzero <- tracking_doi_long %>%
+  filter(speed_aw_cm < 160) %>%
+  mutate(x = ifelse(x < 0, 0, x), y = ifelse(y < 0, 0, y))
+
+master_bins <- tracking_doi_long_nonzero %>%
+  mutate(bin_x = floor(x / bin_width) * bin_width, bin_y = floor(y / bin_width) * bin_width) %>%
+  distinct(source, bin_x, bin_y)
+
+compute_occupancy_by_mouse <- function(data, trial_filter = NULL) {
+  if (!is.null(trial_filter)) data <- data %>% filter(trial_label == trial_filter)
+  data %>%
+    mutate(bin_x = floor(x / bin_width) * bin_width, bin_y = floor(y / bin_width) * bin_width) %>%
+    group_by(source, bin_x, bin_y) %>%
+    summarise(occupancy_time_seconds = n() / 80, .groups = "drop")
+}
+
+compute_htr_map_by_mouse <- function(data, trial_filter = NULL) {
+  if (!is.null(trial_filter)) data <- data %>% filter(trial_label == trial_filter)
+  data %>%
+    filter(htr == "yes") %>%
+    mutate(bin_x = floor(x / bin_width) * bin_width, bin_y = floor(y / bin_width) * bin_width) %>%
+    group_by(source, bin_x, bin_y) %>%
+    summarise(htr_count = n(), .groups = "drop")
+}
+
+occupancy_by_mouse <- compute_occupancy_by_mouse(tracking_doi_long_nonzero)
+occupancy_by_mouse_within <- compute_occupancy_by_mouse(tracking_doi_long_nonzero, "Within trial")
+occupancy_by_mouse_iti <- compute_occupancy_by_mouse(tracking_doi_long_nonzero, "Between trials")
+
+htr_map_by_mouse <- compute_htr_map_by_mouse(tracking_doi_long_nonzero)
+htr_map_by_mouse_within <- compute_htr_map_by_mouse(tracking_doi_long_nonzero, "Within trial")
+htr_map_by_mouse_iti <- compute_htr_map_by_mouse(tracking_doi_long_nonzero, "Between trials")
+
+htr_normalized_permouse <- full_join(htr_map_by_mouse, occupancy_by_mouse, by = c("source", "bin_x", "bin_y")) %>%
+  mutate(htr_rate = (htr_count / occupancy_time_seconds) * 60) %>%
+  replace_na(list(htr_rate = 0))
+
+htr_normalized_permouse_iti <- full_join(htr_map_by_mouse_iti, occupancy_by_mouse_iti, by = c("source", "bin_x", "bin_y")) %>%
+  mutate(htr_rate = (htr_count / occupancy_time_seconds) * 60) %>%
+  replace_na(list(htr_rate = 0))
+
+# within-trial bins are 0-filled against the master grid first (some mice
+# have zero within-trial occupancy in bins other mice do visit)
+occupancy_by_mouse_within_filled <- master_bins %>%
+  left_join(occupancy_by_mouse_within, by = c("source", "bin_x", "bin_y")) %>%
+  replace_na(list(occupancy_time_seconds = 0))
+htr_map_by_mouse_within_filled <- master_bins %>%
+  left_join(htr_map_by_mouse_within, by = c("source", "bin_x", "bin_y")) %>%
+  replace_na(list(htr_count = 0))
+htr_normalized_permouse_within <- occupancy_by_mouse_within_filled %>%
+  left_join(htr_map_by_mouse_within_filled, by = c("source", "bin_x", "bin_y")) %>%
+  mutate(htr_rate = ifelse(occupancy_time_seconds > 0, (htr_count / occupancy_time_seconds) * 60, 0))
+```
+
+```{r grand mean htr maps}
+grand_mean_htr <- htr_normalized_permouse %>%
+  group_by(bin_x, bin_y) %>%
+  summarise(mean_htr_rate = mean(htr_rate, na.rm = TRUE), .groups = "drop") %>%
+  filter(bin_y != 700, bin_x != 1200)
+
+grand_htr_within <- htr_normalized_permouse_within %>%
+  group_by(bin_x, bin_y) %>%
+  summarise(mean_htr_rate = mean(htr_rate, na.rm = TRUE), .groups = "drop") %>%
+  filter(bin_y != 700, bin_x != 1200)
+
+grand_htr_iti <- htr_normalized_permouse_iti %>%
+  group_by(bin_x, bin_y) %>%
+  summarise(mean_htr_rate = mean(htr_rate, na.rm = TRUE), .groups = "drop") %>%
+  filter(bin_y != 700, bin_x != 1200)
+
+write.csv(grand_mean_htr, "D:/R data/htr_grandmean.csv", row.names = FALSE)
+write.csv(grand_htr_iti, "D:/R data/htr_grandmean_iti.csv", row.names = FALSE)
+write.csv(grand_htr_within, "D:/R data/htr_grandmean_within.csv", row.names = FALSE)
+```
+
+# Figure supplemental - spatial permutation tests
+
+```{r permutation test x y coordinates}
+# tests whether htr rate correlates with bin position (x and y
+# separately), by comparing the observed correlation to a null
+# distribution built by shuffling bin position 10,000 times.
+run_position_permutation_test <- function(data, n_permutations = 10000, seed = 123) {
+  set.seed(seed)
+  observed_corr_x <- cor(data$htr_rate, data$bin_x)
+  observed_corr_y <- cor(data$htr_rate, data$bin_y)
+
+  permuted <- matrix(NA, nrow = n_permutations, ncol = 2)
+  for (i in 1:n_permutations) {
+    permuted[i, 1] <- cor(data$htr_rate, sample(data$bin_x))
+    permuted[i, 2] <- cor(data$htr_rate, sample(data$bin_y))
+  }
+
+  list(
+    p_value_x = mean(abs(permuted[, 1]) >= abs(observed_corr_x)),
+    p_value_y = mean(abs(permuted[, 2]) >= abs(observed_corr_y)),
+    observed_corr_x = observed_corr_x,
+    observed_corr_y = observed_corr_y
+  )
+}
+
+htr_normalized_permouse_filtered <- htr_normalized_permouse %>% filter(bin_y != 700, bin_x != 1200)
+htr_normalized_permouse_within_filtered <- htr_normalized_permouse_within %>% filter(bin_y != 700, bin_x != 1200)
+
+# combined (within-trial + iti pooled) - figure 5e
+perm_test_combined <- run_position_permutation_test(htr_normalized_permouse_filtered)
+print("permutation test, combined (all trial periods):")
+print(perm_test_combined)
+
+# within-trial only - figure 4 supplemental
+perm_test_within <- run_position_permutation_test(htr_normalized_permouse_within_filtered)
+print("permutation test, within trial only:")
+print(perm_test_within)
+```
+
+# Figure 5F - HTR rate, within trial vs. ITI (+ sex-difference supplemental)
+
+this uses a separate, simpler pipeline (raw htr timestamps + trial
+timing lookup) rather than the tracking-based pipeline above.
+
+```{r htr rate by trial period}
+doi_conditions <- paste(mouse_sessions$mouse_id, mouse_sessions$session_doi, sep = "_")
+
+get_id_session <- function(name) str_extract(basename(name), "\\d+_\\d+")
+
+htr_rates <- list()
+for (i in seq_along(htr_seconds)) {
+  htr_df <- htr_seconds[[i]]
+  id_session <- get_id_session(names(htr_seconds)[i])
+  id <- str_split(id_session, "_")[[1]][1]
+  session <- str_split(id_session, "_")[[1]][2]
+
+  match_index <- which(str_detect(names(trial_data_lookup), paste0("/", id, "/.*?/", session, "/")))
+  if (length(match_index) != 1) next
+
+  trial_df <- trial_data_lookup[[match_index]]
+  tstart <- trial_df$tstart
+  tend <- trial_df$tend
+
+  htr_df <- htr_df %>% mutate(within_trial = map_lgl(Timestamp, function(ts) any(ts >= tstart & ts <= tend)))
+
+  total_trial_time <- sum(tend - tstart, na.rm = TRUE)
+  total_time <- 2400  # 40 min session, in seconds
+  iti_time <- total_time - total_trial_time
+
+  htrs_in_trial <- sum(htr_df$within_trial)
+  htrs_in_iti <- nrow(htr_df) - htrs_in_trial
+
+  htr_rates[[id_session]] <- data.frame(
+    id = as.numeric(id), session = as.numeric(session),
+    htrs_in_trial = htrs_in_trial, htrs_in_iti = htrs_in_iti,
+    total_trial_time = total_trial_time, iti_time = iti_time,
+    rate_in_trial = htrs_in_trial / total_trial_time,
+    rate_in_iti = htrs_in_iti / iti_time
+  )
+}
+
+htr_rates_doi <- htr_rates[names(htr_rates) %in% doi_conditions]
+htr_rate_df_doi <- bind_rows(htr_rates_doi, .id = "id_session") %>%
+  mutate(
+    rate_in_trial_per_min = rate_in_trial * 60,
+    rate_in_iti_per_min = rate_in_iti * 60,
+    sex = ifelse(id %in% female_ids, "F", "M"),
+    htr = htrs_in_trial + htrs_in_iti,
+    htr_rate = htr / 40  # htr per minute over the full 40-min session
+  )
+
+group_stats_by_sex <- htr_rate_df_doi %>%
+  group_by(sex) %>%
+  summarize(iti_median = median(rate_in_iti_per_min, na.rm = TRUE),
+            trial_median = median(rate_in_trial_per_min, na.rm = TRUE),
+            n = n())
+```
+
+```{r fig 5f}
+htr_rate_df_doi %>%
+  ggplot(aes(x = rate_in_trial_per_min, y = rate_in_iti_per_min, color = sex, shape = sex)) +
+  geom_point(size = 6, stroke = 1.5, alpha = 0.8) +
+  geom_point(data = group_stats_by_sex,
+             aes(x = trial_median, y = iti_median, color = sex),
+             size = 10, shape = 1, stroke = 2.5, inherit.aes = FALSE) +
+  scale_color_manual(values = c("M" = "#00B19E", "F" = "#990068"), guide = "none") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black", size = 1) +
+  labs(title = "HTR rate", x = "Within trial (HTR/min)", y = "ITI (HTR/min)", shape = "Sex") +
+  scale_x_continuous(limits = c(0, 6.5)) +
+  scale_y_continuous(limits = c(0, 6.5)) +
+  coord_fixed(ratio = 1) +
+  theme_classic() +
+  theme(legend.position = c(0.9, 0.15),
+        plot.title = element_text(hjust = 0.5, size = 24),
+        legend.title = element_blank(),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2)) +
+  guides(shape = guide_legend(override.aes = list(color = c("#990068", "#00B19E"))))
+```
+
+```{r fig 5f stats}
+wilcox_5f <- wilcox.test(htr_rate_df_doi$rate_in_trial_per_min, htr_rate_df_doi$rate_in_iti_per_min, paired = TRUE)
+print(wilcox_5f)
+```
+
+```{r fig supplemental htr rate by sex}
+ggplot(htr_rate_df_doi, aes(x = sex, y = htr_rate, color = sex)) +
+  geom_boxplot(aes(fill = sex), alpha = 0.2, color = "black", outlier.shape = NA) +
+  stat_summary(fun = mean, geom = "point", shape = 17, size = 5, color = "red") +
+  geom_beeswarm(size = 3, stroke = 1.5, alpha = 0.8, cex = 2, jitter = 1) +
+  geom_line(aes(group = sex), color = "gray", alpha = 0.8) +
+  labs(x = NULL, y = "HTR/min", color = "Sex", title = "HTR rate") +
+  scale_fill_manual(values = c("F" = "#990068", "M" = "#00899c")) +
+  scale_color_manual(values = c("F" = "#990068", "M" = "#00899c")) +
+  scale_x_discrete(labels = function(x) gsub(" ", "\n", x)) +
+  theme_classic() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 24),
+        text = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.title = element_text(size = 20),
+        axis.text = element_text(size = 20),
+        axis.line = element_line(linewidth = 1.2))
+```
+
+```{r fig 4 supplemental sex difference}
+wilcox_htr_sex <- wilcox.test(htr_rate ~ sex, data = htr_rate_df_doi, exact = FALSE)
+print(wilcox_htr_sex)
+```
+
+# Figure 5A/5B - occupancy, DOI vs. saline data for MATLAB plotting
+
+all 22 mice (not just the subset with matched htr timestamps), ~1 cm
+bins (matching Reese et al.'s bin size), speed-filtered and x-flipped
+the same way as above.
+
+```{r occupancy all 22 mice}
+bin_width_occupancy <- 48  # ~1 cm^2 bins
+
+tracking_doi_long_all22 <- bind_rows(doi_tracking_data_processed, .id = "source") %>%
+  mutate(source_prefix = gsub("_.*", "", source), x = ifelse(source_prefix %in% flip_ids, 1200 - x, x)) %>%
+  select(-source_prefix) %>%
+  filter(speed_aw_cm < 160)
+
+tracking_saline_long_all22 <- bind_rows(saline_tracking_data_processed, .id = "source") %>%
+  mutate(source_prefix = gsub("_.*", "", source), x = ifelse(source_prefix %in% flip_ids, 1200 - x, x)) %>%
+  select(-source_prefix) %>%
+  filter(speed_aw_cm < 160)
+
+compute_occupancy_22 <- function(data, trial_filter = NULL) {
+  if (!is.null(trial_filter)) data <- data %>% filter(trial_label == trial_filter)
+  data %>%
+    mutate(bin_x = floor(x / bin_width_occupancy) * bin_width_occupancy,
+           bin_y = floor(y / bin_width_occupancy) * bin_width_occupancy) %>%
+    group_by(source, bin_x, bin_y) %>%
+    summarise(occupancy_time_seconds = n() / 80, .groups = "drop")
+}
+
+occupancy_by_mouse_22_doi <- compute_occupancy_22(tracking_doi_long_all22)
+occupancy_22_doi_within_trial <- compute_occupancy_22(tracking_doi_long_all22, "Within trial")
+occupancy_22_doi_iti <- compute_occupancy_22(tracking_doi_long_all22, "Between trials")
+
+occupancy_by_mouse_22_saline <- compute_occupancy_22(tracking_saline_long_all22)
+occupancy_22_saline_within_trial <- compute_occupancy_22(tracking_saline_long_all22, "Within trial")
+occupancy_22_saline_iti <- compute_occupancy_22(tracking_saline_long_all22, "Between trials")
+
+grand_mean_across_mice <- function(data, value_col = "occupancy_time_seconds", out_col = "mean_occupancy") {
+  data %>%
+    group_by(bin_x, bin_y) %>%
+    summarise(!!out_col := mean(.data[[value_col]], na.rm = TRUE), .groups = "drop")
+}
+
+occupancy_all_doi <- grand_mean_across_mice(occupancy_by_mouse_22_doi)
+occupancy_all_doi_within_trial <- grand_mean_across_mice(occupancy_22_doi_within_trial)
+occupancy_all_doi_iti <- grand_mean_across_mice(occupancy_22_doi_iti)
+
+occupancy_all_saline <- grand_mean_across_mice(occupancy_by_mouse_22_saline)
+occupancy_all_saline_within_trial <- grand_mean_across_mice(occupancy_22_saline_within_trial)
+occupancy_all_saline_iti <- grand_mean_across_mice(occupancy_22_saline_iti)
+
+# fraction of a session's frames spent in each bin (fixes the broken
+# export noted at the top of this file)
+total_frames_per_source <- tracking_doi_long_all22 %>%
+  group_by(source) %>%
+  summarise(total_frames_in_source = n(), .groups = "drop")
+
+occupancy_doi_frames <- tracking_doi_long_all22 %>%
+  mutate(bin_x = floor(x / bin_width_occupancy) * bin_width_occupancy,
+         bin_y = floor(y / bin_width_occupancy) * bin_width_occupancy) %>%
+  group_by(source, bin_x, bin_y) %>%
+  summarise(occupancy_time_frames = n(), .groups = "drop") %>%
+  left_join(total_frames_per_source, by = "source") %>%
+  mutate(fraction_of_total_frames = occupancy_time_frames / total_frames_in_source) %>%
+  group_by(bin_x, bin_y) %>%
+  summarise(mean_frames = mean(fraction_of_total_frames, na.rm = TRUE), .groups = "drop")
+```
+
+```{r export occupancy csvs}
+# uncomment code to save files to import into MATLAB for plotting
+
+# write.csv(occupancy_doi_frames, "D:/R data/occupancy_doi_frames.csv", row.names = FALSE)
+# 
+# write.csv(occupancy_all_doi, "D:/R data/occupancy_doi_time.csv", row.names = FALSE)
+# write.csv(occupancy_all_doi_within_trial, "D:/R data/occupancy_doi_within.csv", row.names = FALSE)
+# write.csv(occupancy_all_doi_iti, "D:/R data/occupancy_doi_iti.csv", row.names = FALSE)
+# 
+# write.csv(occupancy_all_saline, "D:/R data/occupancy_saline_time.csv", row.names = FALSE)
+# write.csv(occupancy_all_saline_within_trial, "D:/R data/occupancy_saline_within.csv", row.names = FALSE)
+# write.csv(occupancy_all_saline_iti, "D:/R data/occupancy_saline_iti.csv", row.names = FALSE)
+```
