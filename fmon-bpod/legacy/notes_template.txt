@@ -1,0 +1,25 @@
+Experimenter: Amanda Welch
+Trainer: none
+Mouse sex: F
+Date: 2021-01-29, 13:14:13
+Mouse ID: 2139
+Initial weight of mouse: 17.8
+Forced to one side (0=neither, 1=right, 2=left): 0
+Session: 35
+
+Sniffing: No
+Occluded Nostril: none
+Odor Type: pinene(7)
+Odor Percentage: 0.0001
+
+WATER CALIBRATION
+Left Port: 7.45
+Right Port: 7.15
+Initiation Port: 7.04
+
+PERFORMANCE
+T: 90/125.  0/0.  0/0.  0/0.  11/13.
+L: 31/61.  0/0.  0/0.  0/0.  4/6.
+R: 59/64.  0/0.  0/0.  0/0.  7/7.
+
+EXPERIMENTERS NOTES: 

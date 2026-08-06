@@ -5,7 +5,8 @@ psychedelic drug on olfactory search behavior by mice," bioRxiv
 [2025.07.09.663970](https://www.biorxiv.org/content/10.1101/2025.07.09.663970v1).
 `analysis/` contains the figure-generating code (R Markdown and MATLAB);
 `nwb_conversion/` contains the script used to convert the raw session
-data into NWB format.
+data into NWB format; `fmon-bpod/` contains the Bonsai/Bpod task-control
+tooling.
 
 Raw data is archived on DANDI: [dandiset 001863](https://dandiarchive.org/dandiset/001863).
 The analysis scripts read from hardcoded paths on the original data
