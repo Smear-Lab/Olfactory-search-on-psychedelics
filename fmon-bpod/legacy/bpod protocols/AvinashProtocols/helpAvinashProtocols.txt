@@ -1,0 +1,20 @@
+ASD_FaceTracking:
+-  analog input (A2D)
+- BPod notebook
+ - output to BNC (TTL)
+ - state for Analog input
+ - state for conditional output
+
+Run_DeltaC
+- skip some states to go to end (skip reward)
+- send TTL from BNC1 ('BNCState')
+
+Try_AOut
+- send signal from Analog Output
+- send to MFC by using the RB6 connector
+- set parameters line 13-18
+
+OdorDiscrimination
+- case (matlab: switch) condition (modify commands based on recurrent/user/read inputs)
+- state delay action
+- e.g., deliver reward or not depending on mouse behavior
