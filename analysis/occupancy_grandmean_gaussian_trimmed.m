@@ -5,6 +5,18 @@
 %
 % reads csvs written by fig5_htr_occupancy.Rmd. r and matlab code are
 % kept in separate files intentionally.
+%
+% Shared pipeline, repeated below with different inputs/color scales:
+%   1. bin (x, y) samples into a 2D grid, summing a value per bin
+%      (htr_count, mean_htr_rate, or mean_occupancy depending on section)
+%   2. upscale that grid by `upscale`x via nearest-neighbor (imresize)
+%   3. gaussian-smooth the upscaled grid (imgaussfilt) so the plotted map
+%      isn't blocky at the original bin resolution
+%   4. plot with imagesc, using a `cubehelix` colormap (third-party
+%      perceptually-uniform colormap generator, not built into MATLAB --
+%      see https://www.mathworks.com/matlabcentral/fileexchange/43700)
+% All paths below (D:\...) are specific to the Windows machine this was
+% written on and will need updating to run elsewhere.
 
 %% Load data
 occupancy_doi_time = readtable("D:\R data\occupancy_doi_time.csv");
@@ -18,6 +30,8 @@ htr_rate_within = readtable("D:\R data\htr_grandmean_within.csv");
 upscale = 10;  % upscaling factor used for all gaussian-smoothed maps
 
 %% Raw HTR map
+% unnormalized: total HTR count per bin, pooled across all DOI mice (see
+% pipeline description above)
 x_coordinates = htr_bins.x_bin;
 y_coordinates = htr_bins.y_bin;
 
@@ -59,6 +73,9 @@ set(h, 'Ticks', [yticks_h(1), yticks_h(end)]);
 set(h, 'YTickLabel', {num2str(yticks_h(1), '%.0f'), num2str(yticks_h(end), '%.0f')});
 
 %% Occupancy normalized HTR map
+% htr_rate.mean_htr_rate is already occupancy-normalized (HTR/min) and
+% grand-averaged across mice upstream, in fig5_cleaned.Rmd -- this block
+% just bins/smooths/plots it, same pipeline as the raw map above
 x_coordinates = htr_rate.bin_x;
 y_coordinates = htr_rate.bin_y;
 
@@ -103,6 +120,7 @@ set(h, 'Ticks', [yticks_h(1), yticks_h(end)]);
 set(h, 'YTickLabel', {num2str(yticks_h(1), '%.0f'), num2str(yticks_h(end), '%.0f')});
 
 %% HTR map ITI
+% same as the occupancy-normalized map above, restricted to ITI periods
 x_coordinates = htr_rate_iti.bin_x;
 y_coordinates = htr_rate_iti.bin_y;
 
@@ -143,6 +161,7 @@ set(h, 'Ticks', [yticks_h(1), yticks_h(end)]);
 set(h, 'YTickLabel', {num2str(yticks_h(1), '%.0f'), num2str(yticks_h(end), '%.0f')});
 
 %% HTR map within trial
+% same as the occupancy-normalized map above, restricted to within-trial periods
 x_coordinates = htr_rate_within.bin_x;
 y_coordinates = htr_rate_within.bin_y;
 
@@ -183,12 +202,15 @@ set(h, 'Ticks', [yticks_h(1), yticks_h(end)]);
 set(h, 'YTickLabel', {num2str(yticks_h(1), '%.0f'), num2str(yticks_h(end), '%.0f')});
 
 %% DOI occupancy map and Saline occupancy map
+% time spent per bin (mean_occupancy, in seconds), grand-averaged across
+% mice upstream in fig5_cleaned.Rmd -- same pipeline again, looped over
+% the two conditions so both panels get identical styling/color scale
 cmap = 1-(cubehelix(256, 0.5, -1, 1.5, 1.0));
 
 frames = {'occupancy_doi_time', 'saline_full'};
 
 for f = 1:length(frames)
-    current_frame = eval(frames{f});
+    current_frame = eval(frames{f});  % looks up the variable by name (see `frames` above)
 
     x_coordinates = current_frame.bin_x;
     y_coordinates = current_frame.bin_y;

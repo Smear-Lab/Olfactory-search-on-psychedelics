@@ -10,6 +10,26 @@ separately in occupancy_grandmean_gaussian.mlx (matlab) - this script
 only writes the csvs that script reads in, plus runs the reported stats.
 r and matlab code are kept in separate files intentionally.
 
+<!--
+Two things worth knowing before re-running this file:
+- The `write.csv` calls for the occupancy_*.csv files that the MATLAB
+  script needs (see "export occupancy csvs" chunk near the end) are
+  commented out. A fresh run of this notebook will NOT regenerate those
+  CSVs -- they only exist because someone ran that block manually at some
+  point. Uncomment before relying on a from-scratch re-run.
+- `bin_width` for the HTR grand-mean CSVs (below) is 100 px in this
+  version of the file. If you find more than one copy of
+  htr_grandmean_iti/htr_grandmean_within on the drive with different bin
+  spacing (120 vs 100 px seen once already) and different values, this is
+  almost certainly why: this script was re-run after `bin_width` changed,
+  and the old output was never deleted.
+-->
+
+<!-- "fixes the broken export noted at the top of this file" (chunk
+     "occupancy all 22 mice" below) doesn't refer to anything actually at
+     the top of this file as it stands now -- likely a stale comment left
+     over from an earlier version. Left as-is, not resolved. -->
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)

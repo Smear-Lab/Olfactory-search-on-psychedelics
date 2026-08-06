@@ -15,6 +15,14 @@ library(data.table)
 library(ggplot2)
 ```
 
+<!--
+Figure 3: trial/ITI duration (3A/3B) and DLC nose-tracking speed (3C/3D),
+DOI vs. saline, paired by mouse. 3C/3D depend on a separately-run DLC
+tracking pipeline (see "dlc pipeline reference" chunk below, eval=FALSE --
+included for reference/reproducibility, not executed by this notebook;
+its output is loaded pre-computed from D:/R data/TrackingAll.Rds).
+-->
+
 ```{r shared setup}
 # mouse id, doi session number, and saline session number for each animal.
 # used throughout 3a-3d, and reshaped into a lookup list for 3c/3d below.

@@ -10,6 +10,15 @@ library(ggplot2)
 library(dplyr)
 ```
 
+<!--
+Figure 2: time spent at the reward port ("drinking" events, from each
+session's drinking_data_iti_2.txt / drinking_data_incorrect_trials_iti_2.txt),
+DOI vs. saline, split by correct (2A/2B) vs. incorrect (2C/2D) trials.
+2A/2C = cumulative distribution of single-event duration, split further
+into odor vs. omission trials; 2B/2D = per-mouse median duration, paired
+scatter.
+-->
+
 ```{r import data}
 # mouse id, doi session number, and saline session number for each animal
 mouse_sessions <- data.frame(

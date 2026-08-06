@@ -7,6 +7,17 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+<!--
+Figure 1: task accuracy and engagement, DOI vs. saline, all paired by
+mouse (one DOI session + one saline session per animal). 1B = odor-trial
+accuracy; 1C = accuracy over the first 40 min, 5-min bins; 1D = trials
+completed in 40 min; 1E = trial-initiation ("repoke") rate during the ITI.
+The dose/session-number/sex lookup tables below (`doi_dose`/`saline_dose`/
+`sex`) are re-typed by hand 3 times in this file (once per section) rather
+than defined once and reused -- same session list each time, just
+duplicated, not a discrepancy.
+-->
+
 # Figure 1
 
 ```{r}
@@ -283,6 +294,8 @@ df_id_sex_accuracy_trials <- odor_trials %>%
 
 # 1B
 
+Odor-trial accuracy, DOI vs. saline, one point per mouse.
+
 ```{r 1B}
 modified_df %>% 
   ggplot(aes(x = saline_correct, 
@@ -349,7 +362,14 @@ result_wilcox_test_omission <- wilcox.test(modified_df_omission$doi_correct,
 print(result_wilcox_test_omission)
 ```
 
+<!-- no explicit "# 1C" heading in the original file; added here since
+     the plot immediately below ("Accuracy over time") is 1C, matching
+     the numbering of every other panel in this figure -->
+
 # 1C
+
+Accuracy over the first 40 min of the session, binned into 5-min windows,
+one grand-mean trace per condition (individual mice shown faint behind it).
 
 ```{r}
 # define the list of conditions for mouse ID and session number for DOI
@@ -429,6 +449,9 @@ for (i in seq_along(saline_trial_summaries)) {
 ```
 
 ```{r rolling accuracy saline}
+# for each session, computes a running (cumulative, trial-by-trial) percent
+# correct, separately for odor and omission trials -- this is the per-mouse
+# trace plotted faint behind the grand mean in 1C above
 # loop through each data frame in saline_trial_summaries
 for (df_name in names(saline_trial_summaries)) {
   df <- saline_trial_summaries[[df_name]]
@@ -800,6 +823,8 @@ print(wilcoxon_results)
 
 # 1D
 
+Trials completed in 40 min, DOI vs. saline, one point per mouse.
+
 ```{r calculate columns of stats}
 data_above40trials %>% 
   map(~summarise(group_by(., odor_setting),
@@ -1049,6 +1074,11 @@ paired_data_wide %>%
 ```
 
 # 1E
+
+Trial-initiation attempt ("repoke") rate during the ITI, DOI vs. saline,
+one point per mouse. Uses `trialsummary_falsealarms_softcode_repoke.txt`
+(has a `repoke` column) rather than the plain `trialsummary.txt` used
+above, since repoke counts aren't in the plain file.
 
 ```{r}
 # define the IDs and sessions to keep

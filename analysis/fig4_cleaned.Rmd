@@ -16,6 +16,15 @@ library(ggplot2)
 library(coin)
 ```
 
+<!--
+Figure 4: sniff frequency (from Task sniff params/*.mat, thermistor-derived
+inhalation timing), DOI vs. saline. 4A/4B = per-mouse density overlays;
+4C = pooled density, mean +/- SEM across mice; 4D = 4C split by trial
+period (odor/omission/ITI); 4E = per-mouse median frequency, paired
+scatter. Two mice (2198_17 DOI, 2195_17 DOI; 2198_19, 2213_18 saline) are
+excluded throughout as "faulty" -- reason not stated in this file.
+-->
+
 ```{r import sniff files}
 dir_path <- "D:\\Task sniff params"
 
